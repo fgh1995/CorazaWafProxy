@@ -1,0 +1,2366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CorazaWAF 安全防护监控大屏</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            overflow: hidden;
+            background-color: #0a0e27;
+            font-family: 'Microsoft YaHei', Arial, sans-serif;
+        }
+        
+        .dashboard-container {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%);
+            overflow: hidden;
+            box-sizing: border-box;
+        }
+        
+        * {
+            box-sizing: border-box;
+        }
+        
+        .dashboard-header {
+            width: 100%;
+            padding: 15px 30px;
+            background: linear-gradient(90deg, rgba(0, 229, 255, 0.1) 0%, transparent 100%);
+            border-bottom: 2px solid rgba(0, 229, 255, 0.3);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+        }
+        
+        .dashboard-header h1 {
+            color: #00e5ff;
+            font-size: 28px;
+            font-weight: bold;
+            text-shadow: 0 0 20px rgba(0, 229, 255, 0.5);
+            letter-spacing: 2px;
+        }
+        
+        .dashboard-time {
+            color: #00e5ff;
+            font-size: 18px;
+            font-weight: 600;
+        }
+        
+        .dashboard-grid {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 280px 1fr 380px;
+            gap: 15px;
+            padding: 15px;
+            min-height: 0;
+            overflow-y: auto;
+        }
+
+        .realtime-cards {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .realtime-card {
+            background: linear-gradient(135deg, rgba(0, 229, 255, 0.1) 0%, rgba(0, 229, 255, 0.05) 100%);
+            border: 1px solid rgba(0, 229, 255, 0.3);
+            border-radius: 6px;
+            padding: 10px;
+            box-shadow: 0 4px 15px rgba(0, 229, 255, 0.2);
+        }
+
+        .realtime-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .realtime-card.traffic {
+            margin-bottom: 8px;
+        }
+
+        .realtime-card.attack {
+            margin-top: 8px;
+        }
+
+        .realtime-card.attack {
+            background: linear-gradient(135deg, rgba(255, 68, 68, 0.1) 0%, rgba(255, 68, 68, 0.05) 100%);
+            border-color: rgba(255, 68, 68, 0.3);
+            box-shadow: 0 4px 15px rgba(255, 68, 68, 0.2);
+        }
+
+        .realtime-card-title {
+            color: #00e5ff;
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .realtime-card.attack .realtime-card-title {
+            color: #ff4444;
+        }
+
+        .realtime-card-value {
+            color: #00e5ff;
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 4px;
+            text-shadow: 0 0 10px rgba(0, 229, 255, 0.5);
+        }
+
+        .realtime-card.attack .realtime-card-value {
+            color: #ff4444;
+            text-shadow: 0 0 10px rgba(255, 68, 68, 0.5);
+        }
+
+        .realtime-card-value.small {
+            font-size: 16px;
+            margin-top: 4px;
+            color: #34a853;
+            text-shadow: 0 0 10px rgba(52, 168, 83, 0.5);
+        }
+
+        .realtime-card.attack .realtime-card-value.small {
+            color: #ea4335;
+            text-shadow: 0 0 10px rgba(234, 67, 53, 0.5);
+        }
+
+        .realtime-card-subtitle {
+            color: #8b9bb4;
+            font-size: 10px;
+        }
+
+        .chart-container-small {
+            height: 40px;
+            margin-top: 6px;
+            position: relative;
+            overflow: visible;
+        }
+
+        .chart-container-small canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        .chart-container-small canvas:last-child {
+            z-index: 2;
+        }
+
+        .qps-bars {
+            display: flex;
+            gap: 4px;
+            align-items: flex-end;
+            height: 24px;
+            padding-bottom: 2px;
+        }
+
+        .attack-bars {
+            height: 24px;
+        }
+
+        .qps-bar {
+            width: 4px;
+            min-height: 4px;
+            background: linear-gradient(180deg, #00e5ff, #00b8e6);
+            border-radius: 2px 2px 0 0;
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        .qps-bar:nth-child(1) {
+            animation-name: pulse1;
+            animation-delay: 0s;
+        }
+
+        .qps-bar:nth-child(2) {
+            animation-name: pulse2;
+            animation-delay: 0.2s;
+        }
+
+        .qps-bar:nth-child(3) {
+            animation-name: pulse3;
+            animation-delay: 0.4s;
+        }
+
+        .realtime-card.attack .qps-bar {
+            background: linear-gradient(180deg, #ff4444, #cc0000);
+        }
+
+        @keyframes pulse1 {
+            0%, 100% {
+                height: 4px;
+                opacity: 0.4;
+            }
+            50% {
+                height: 16px;
+                opacity: 1;
+            }
+        }
+
+        @keyframes pulse2 {
+            0%, 100% {
+                height: 6px;
+                opacity: 0.4;
+            }
+            50% {
+                height: 24px;
+                opacity: 1;
+            }
+        }
+
+        @keyframes pulse3 {
+            0%, 100% {
+                height: 8px;
+                opacity: 0.4;
+            }
+            50% {
+                height: 20px;
+                opacity: 1;
+            }
+        }
+
+        .attack-bars .qps-bar {
+            animation-name: attack-pulse1;
+            animation: attack-pulse1 1.5s ease-in-out infinite;
+        }
+
+        .attack-bars .qps-bar:nth-child(1) {
+            animation-name: attack-pulse1;
+            animation-delay: 0s;
+        }
+
+        .attack-bars .qps-bar:nth-child(2) {
+            animation-name: attack-pulse2;
+            animation-delay: 0.2s;
+        }
+
+        .attack-bars .qps-bar:nth-child(3) {
+            animation-name: attack-pulse3;
+            animation-delay: 0.4s;
+        }
+
+        @keyframes attack-pulse1 {
+            0%, 100% {
+                height: 5px;
+                opacity: 0.4;
+            }
+            50% {
+                height: 17px;
+                opacity: 1;
+            }
+        }
+
+        @keyframes attack-pulse2 {
+            0%, 100% {
+                height: 7px;
+                opacity: 0.4;
+            }
+            50% {
+                height: 23px;
+                opacity: 1;
+            }
+        }
+
+        @keyframes attack-pulse3 {
+            0%, 100% {
+                height: 9px;
+                opacity: 0.4;
+            }
+            50% {
+                height: 19px;
+                opacity: 1;
+            }
+        }
+        
+        .dashboard-sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        
+        .stat-card {
+            background: linear-gradient(135deg, rgba(0, 229, 255, 0.1) 0%, rgba(0, 229, 255, 0.05) 100%);
+            border: 1px solid rgba(0, 229, 255, 0.3);
+            border-radius: 12px;
+            padding: 15px;
+            text-align: center;
+            box-shadow: 0 4px 20px rgba(0, 229, 255, 0.2);
+        }
+        
+        .stat-icon {
+            font-size: 40px;
+            margin-bottom: 8px;
+        }
+        
+        .stat-value {
+            font-size: 30px;
+            font-weight: bold;
+            color: #00e5ff;
+            margin-bottom: 5px;
+            text-shadow: 0 0 10px rgba(0, 229, 255, 0.5);
+        }
+        
+        .stat-label {
+            font-size: 12px;
+            color: #8b9bb4;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .dashboard-main {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        
+        .map-container {
+            flex: 1;
+            background: rgba(0, 0, 0, 0.3);
+            border: 2px solid rgba(0, 229, 255, 0.3);
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 20px rgba(0, 229, 255, 0.2);
+        }
+        
+        .world-map {
+            width: 100%;
+            height: 100%;
+        }
+        
+        .dashboard-right {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            min-height: 0;
+        }
+        
+        .logs-container {
+            flex: 1;
+            background: linear-gradient(135deg, rgba(255, 68, 68, 0.1) 0%, rgba(255, 68, 68, 0.05) 100%);
+            border: 1px solid rgba(255, 68, 68, 0.3);
+            border-radius: 12px;
+            padding: 15px;
+            overflow: hidden;
+            box-shadow: 0 4px 20px rgba(255, 68, 68, 0.2);
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .logs-title {
+            color: #ff4444;
+            font-size: 16px;
+            font-weight: bold;
+            margin-bottom: 12px;
+            text-shadow: 0 0 10px rgba(255, 68, 68, 0.5);
+            flex-shrink: 0;
+        }
+        
+        .logs-list {
+            flex: 1;
+            overflow-y: auto;
+            min-height: 0;
+        }
+        
+        .logs-list::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        .logs-list::-webkit-scrollbar-track {
+            background: rgba(255, 68, 68, 0.1);
+        }
+        
+        .logs-list::-webkit-scrollbar-thumb {
+            background: rgba(255, 68, 68, 0.5);
+            border-radius: 3px;
+        }
+        
+        .log-item {
+            background: rgba(255, 68, 68, 0.15);
+            border-left: 3px solid #ff4444;
+            padding: 12px;
+            margin-bottom: 8px;
+            border-radius: 4px;
+        }
+        
+        .log-ip {
+            color: #ff4444;
+            font-weight: bold;
+            font-size: 14px;
+            margin-bottom: 5px;
+        }
+        
+        .log-info {
+            color: #ffaaaa;
+            font-size: 12px;
+            margin-bottom: 5px;
+        }
+        
+        .log-time {
+            color: #aaaaaa;
+            font-size: 11px;
+        }
+        
+        #ip-block-logs-list .log-item {
+            background: rgba(255, 184, 0, 0.1);
+            border-left: 3px solid #ffb800;
+        }
+        
+        #ip-block-logs-list .log-ip {
+            color: #ffb800;
+        }
+        
+        #ip-block-logs-list .log-info {
+            color: #ffddaa;
+        }
+        
+        .ip-block-logs-container {
+            background: linear-gradient(135deg, rgba(255, 184, 0, 0.1) 0%, rgba(255, 184, 0, 0.05) 100%);
+            border: 1px solid rgba(255, 184, 0, 0.3);
+            box-shadow: 0 4px 20px rgba(255, 184, 0, 0.2);
+        }
+        
+        .ip-block-logs-container .logs-title {
+            color: #ffb800;
+            text-shadow: 0 0 10px rgba(255, 184, 0, 0.5);
+        }
+        
+        #ip-block-logs-list::-webkit-scrollbar-track {
+            background: rgba(255, 184, 0, 0.1);
+        }
+        
+        #ip-block-logs-list::-webkit-scrollbar-thumb {
+            background: rgba(255, 184, 0, 0.5);
+            border-radius: 3px;
+        }
+        
+        .log-url {
+            color: #88ccff;
+            font-size: 11px;
+            margin-bottom: 5px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        
+        #ip-block-logs-list .log-url {
+            color: #aadddd;
+        }
+        
+        .leaflet-container {
+            background-color: rgba(0, 0, 0, 0.5) !important;
+        }
+        
+        .leaflet-tooltip-pane {
+            z-index: 400 !important;
+        }
+        
+        .leaflet-overlay-pane {
+            z-index: 500 !important;
+        }
+        
+        .server-tooltip {
+            background-color: rgba(0, 229, 255, 0.9) !important;
+            color: #000 !important;
+            border: none !important;
+            border-radius: 4px !important;
+            font-weight: 600 !important;
+            box-shadow: 0 0 15px rgba(0, 229, 255, 0.5) !important;
+        }
+        
+        .source-tooltip {
+            background-color: rgba(255, 68, 68, 0.9) !important;
+            color: #fff !important;
+            border: none !important;
+            border-radius: 4px !important;
+            font-weight: 600 !important;
+            box-shadow: 0 0 15px rgba(255, 68, 68, 0.5) !important;
+        }
+        
+        .realtime-tooltip {
+            background-color: rgba(255, 0, 0, 0.9) !important;
+            color: #fff !important;
+            border: none !important;
+            border-radius: 4px !important;
+            font-weight: 600 !important;
+            box-shadow: 0 0 15px rgba(255, 0, 0, 0.5) !important;
+        }
+        
+        .attack-tooltip {
+            background-color: rgba(255, 0, 0, 0.9) !important;
+            color: #fff !important;
+            border: none !important;
+            border-radius: 4px !important;
+            font-weight: 600 !important;
+            box-shadow: 0 0 15px rgba(255, 0, 0, 0.5) !important;
+        }
+        
+        .ipblock-tooltip {
+            background-color: rgba(255, 184, 0, 0.9) !important;
+            color: #000 !important;
+            border: none !important;
+            border-radius: 4px !important;
+            font-weight: 600 !important;
+            box-shadow: 0 0 15px rgba(255, 184, 0, 0.5) !important;
+        }
+        
+        @keyframes pulse {
+            0%, 100% {
+                transform: scale(1);
+            }
+            50% {
+                transform: scale(1.05);
+            }
+        }
+        
+        .leaflet-tooltip-left {
+            margin-left: -10px !important;
+        }
+        
+        .leaflet-tooltip-right {
+            margin-left: 10px !important;
+        }
+        
+        .leaflet-tooltip-top {
+            margin-top: -10px !important;
+        }
+        
+        .leaflet-tooltip-bottom {
+            margin-top: 10px !important;
+        }
+        
+        .dashboard-btn {
+            background: linear-gradient(135deg, #00e5ff 0%, #00b8e6 100%);
+            border: none;
+            border-radius: 8px;
+            padding: 8px 16px;
+            color: #000;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            box-shadow: 0 4px 15px rgba(0, 229, 255, 0.3);
+            transition: all 0.3s ease;
+            width: 100%;
+            justify-content: center;
+            margin-bottom: 12px;
+        }
+        
+        .dashboard-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 229, 255, 0.5);
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard-container">
+        <div class="dashboard-header">
+            <h1>CorazaWAF 安全防护监控大屏</h1>
+            <div class="dashboard-time" id="dashboard-time"></div>
+        </div>
+        
+        <div class="dashboard-grid">
+            <div class="dashboard-sidebar">
+                <button id="sound-toggle-btn" class="dashboard-btn" onclick="toggleSound()">
+                    <span id="sound-icon">🔇</span>
+                    <span id="sound-text">启用声音</span>
+                </button>
+                <div class="stat-card">
+                    <div class="stat-icon">🛡️</div>
+                    <div class="stat-value" id="total-attacks">0</div>
+                    <div class="stat-label">拦截次数</div>
+                </div>
+                
+                <div class="stat-card">
+                    <div class="stat-icon">🌍</div>
+                    <div class="stat-value" id="unique-ips">0</div>
+                    <div class="stat-label">攻击次数</div>
+                </div>
+                
+                <div class="stat-card">
+                    <div class="stat-icon">📊</div>
+                    <div class="stat-value" id="request-count">0</div>
+                    <div class="stat-label">请求次数</div>
+                </div>
+                
+                <div class="stat-card">
+                    <div class="stat-icon">👥</div>
+                    <div class="stat-value" id="pv-count">0</div>
+                    <div class="stat-label">访问次数 (PV)</div>
+                </div>
+                
+                <div class="stat-card">
+                    <div class="stat-icon">👤</div>
+                    <div class="stat-value" id="uv-count">0</div>
+                    <div class="stat-label">独立访客 (UV)</div>
+                </div>
+            </div>
+            
+            <div class="dashboard-main">
+                <div class="map-container">
+                    <div id="world-map" class="world-map"></div>
+                </div>
+            </div>
+            
+            <div class="dashboard-right">
+                <div class="realtime-cards">
+                    <div class="realtime-card traffic">
+                        <div class="realtime-card-header">
+                            <div class="realtime-card-title">实时流量</div>
+                        </div>
+                        <div class="realtime-card-value" id="dashboard-traffic">0 B/s</div>
+                        <div class="realtime-card-subtitle">入站</div>
+                        <div class="realtime-card-value small" id="dashboard-traffic-out">0 B/s</div>
+                        <div class="realtime-card-subtitle">出站</div>
+                        <div class="chart-container-small">
+                            <div id="dashboard-traffic-chart" style="width: 100%; height: 40px;"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="realtime-card">
+                        <div class="realtime-card-header">
+                            <div class="realtime-card-title">实时QPS</div>
+                            <div class="qps-bars">
+                                <div class="qps-bar"></div>
+                                <div class="qps-bar"></div>
+                                <div class="qps-bar"></div>
+                            </div>
+                        </div>
+                        <div class="realtime-card-value" id="dashboard-qps">0</div>
+                        <div class="realtime-card-subtitle">每秒请求数</div>
+                        <div class="chart-container-small">
+                            <div id="dashboard-qps-chart" style="width: 100%; height: 40px;"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="realtime-card attack">
+                        <div class="realtime-card-header">
+                            <div class="realtime-card-title">实时攻击</div>
+                            <div class="qps-bars attack-bars">
+                                <div class="qps-bar"></div>
+                                <div class="qps-bar"></div>
+                                <div class="qps-bar"></div>
+                            </div>
+                        </div>
+                        <div class="realtime-card-value" id="dashboard-attack-count">0</div>
+                        <div class="realtime-card-subtitle">每秒攻击数</div>
+                        <div class="chart-container-small">
+                            <div id="dashboard-attack-chart" style="width: 100%; height: 40px;"></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="logs-container">
+                    <div class="logs-title">最新攻击日志</div>
+                    <div class="logs-list" id="logs-list"></div>
+                </div>
+                
+                <div class="logs-container ip-block-logs-container" style="margin-top: 12px;">
+                    <div class="logs-title">IP封锁日志</div>
+                    <div class="logs-list" id="ip-block-logs-list"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script>
+        function formatUTCTimeToLocal(utcTimeString) {
+            if (!utcTimeString) return '';
+            
+            let date;
+            if (utcTimeString.includes('T')) {
+                date = new Date(utcTimeString);
+            } else {
+                date = new Date(utcTimeString.replace(' ', 'T') + 'Z');
+            }
+            
+            if (isNaN(date.getTime())) return utcTimeString;
+            
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            const hours = String(date.getHours()).padStart(2, '0');
+            const minutes = String(date.getMinutes()).padStart(2, '0');
+            const seconds = String(date.getSeconds()).padStart(2, '0');
+            return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+        }
+
+        const dashboard = {
+            refreshInterval: null,
+            map: null,
+            markers: [],
+            attackAnimations: [],
+            ipBlockAnimations: [],
+            serverLocation: null,
+            serverMarker: null,
+            previousTotalAttacks: 0,
+            previousTotalIPBlocks: 0,
+            currentAttackIndex: 0,
+            currentIPBlockIndex: 0,
+            trafficHistory: [],
+            qpsHistory: [],
+            attackHistory: [],
+            dashboardQpsChart: null,
+            dashboardTrafficChart: null,
+            dashboardAttackChart: null,
+            attackMouseX: null,
+            soundEnabled: false,
+            alertSound: null,
+            alert1Sound: null,
+            lastAttackLogId: 0,
+            lastIPBlockLogId: 0,
+            attackLogsCurrentPage: 1,
+            attackLogsPageSize: 50,
+            attackLogsTotalPages: 1,
+            attackLogsTotal: 0,
+            attackLogsLoaded: [],
+            ipBlockLogsCurrentPage: 1,
+            ipBlockLogsPageSize: 50,
+            ipBlockLogsTotalPages: 1,
+            ipBlockLogsTotal: 0,
+            ipBlockLogsLoaded: [],
+            
+            initSounds() {
+                this.alertSound = new Audio('/sounds/attack.mp3');
+                this.alert1Sound = new Audio('/sounds/ip_attack.mp3');
+                
+                this.alertSound.preload = 'auto';
+                this.alert1Sound.preload = 'auto';
+            },
+            
+            playAlertSound() {
+                if (this.soundEnabled && this.alertSound) {
+                    this.alertSound.currentTime = 0;
+                    this.alertSound.play().catch(e => console.log('播放alert声音失败:', e));
+                }
+            },
+            
+            playAlert1Sound() {
+                if (this.soundEnabled && this.alert1Sound) {
+                    this.alert1Sound.currentTime = 0;
+                    this.alert1Sound.play().catch(e => console.log('播放alert1声音失败:', e));
+                }
+            },
+            
+            init() {
+                this.initMap();
+                this.initSounds();
+                this.updateTime();
+                this.loadStats();
+                this.loadServerLocation().then(() => {
+                    this.loadLogs().then(() => {
+                        this.startAutoRefresh();
+                    });
+                });
+            },
+            
+            initMap() {
+                this.map = L.map('world-map', {
+                    center: [20, 0],
+                    zoom: 2,
+                    minZoom: 2,
+                    maxZoom: 10,
+                    zoomControl: true,
+                    attributionControl: false
+                });
+                
+                L.tileLayer('/tiles/{z}/{x}/{y}.png', {
+                    maxZoom: 10,
+                    minZoom: 2
+                }).addTo(this.map);
+            },
+            
+            async loadServerLocation() {
+                try {
+                    console.log('开始加载服务器位置...');
+                    const response = await fetch('/api/server-ip');
+                    const data = await response.json();
+                    
+                    console.log('服务器IP响应:', data);
+                    
+                    if (data.success && data.ip) {
+                        console.log('获取到服务器IP:', data.ip);
+                        const geoLocation = await this.getServerGeoLocation(data.ip);
+                        console.log('服务器地理位置:', geoLocation);
+                        if (geoLocation && geoLocation.latitude !== 0 && geoLocation.longitude !== 0) {
+                            this.serverLocation = geoLocation;
+                            this.addServerMarker();
+                            console.log('服务器标记已添加');
+                        } else {
+                            console.error('服务器地理位置无效:', geoLocation);
+                        }
+                    } else {
+                        console.error('获取服务器IP失败:', data);
+                    }
+                } catch (error) {
+                    console.error('加载服务器位置失败:', error);
+                }
+            },
+            
+            async getServerGeoLocation(host) {
+                try {
+                    console.log('查询IP地理位置:', host);
+                    const response = await fetch(`/api/ip-location?ip=${host}`);
+                    const data = await response.json();
+                    console.log('IP地理位置响应:', data);
+                    if (data.success) {
+                        return {
+                            latitude: data.latitude,
+                            longitude: data.longitude,
+                            country: data.country,
+                            province: data.province,
+                            city: data.city
+                        };
+                    } else {
+                        console.error('IP地理位置查询失败:', data);
+                        return null;
+                    }
+                } catch (error) {
+                    console.error('获取服务器地理位置失败:', error);
+                    return null;
+                }
+            },
+            
+            addServerMarker() {
+                if (!this.serverLocation || !this.map) return;
+                
+                const serverLatLng = [this.serverLocation.latitude, this.serverLocation.longitude];
+                
+                if (this.serverMarker) {
+                    this.map.removeLayer(this.serverMarker);
+                }
+                
+                this.serverMarker = L.circleMarker(serverLatLng, {
+                    radius: 8,
+                    fillColor: '#00ff00',
+                    color: '#00ff00',
+                    weight: 2,
+                    opacity: 1,
+                    fillOpacity: 0.8
+                }).addTo(this.map);
+                
+                const locationText = `${this.serverLocation.country || ''} ${this.serverLocation.province || ''} ${this.serverLocation.city || ''}`.trim();
+                this.serverMarker.bindTooltip(`服务器\n${locationText}`, {
+                    permanent: true,
+                    direction: 'top',
+                    className: 'server-tooltip'
+                });
+            },
+            
+            updateTime() {
+                const updateTime = () => {
+                    const now = new Date();
+                    const timeStr = now.toLocaleString('zh-CN', {
+                        year: 'numeric',
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit'
+                    });
+                    document.getElementById('dashboard-time').textContent = timeStr;
+                };
+                updateTime();
+                setInterval(updateTime, 1000);
+            },
+            
+            async loadStats() {
+                try {
+                    const [statsResponse, historyResponse] = await Promise.all([
+                        fetch('/api/statistics'),
+                        fetch('/api/statistics/history')
+                    ]);
+                    
+                    const stats = await statsResponse.json();
+                    const history = await historyResponse.json();
+                    
+                    console.log('统计数据:', stats);
+                    console.log('历史数据:', history);
+                    
+                    document.getElementById('total-attacks').textContent = stats.blockedCount || 0;
+                    document.getElementById('unique-ips').textContent = stats.attackIP || 0;
+                    document.getElementById('request-count').textContent = stats.requestCount || 0;
+                    document.getElementById('pv-count').textContent = stats.pv || 0;
+                    document.getElementById('uv-count').textContent = stats.uv || 0;
+                    
+                    this.updateTraffic(history);
+                    this.updateQPS(history);
+                    this.updateAttack(history);
+                } catch (error) {
+                    console.error('加载统计数据失败:', error);
+                }
+            },
+            
+            async loadLogs() {
+                try {
+                    const response = await fetch(`/api/logs?filter=attack&page=${this.attackLogsCurrentPage}&pageSize=${this.attackLogsPageSize}`);
+                    const result = await response.json();
+                    
+                    if (result.success && result.data) {
+                        this.attackLogsTotal = result.total || 0;
+                        this.attackLogsTotalPages = result.totalPages || 1;
+                        
+                        this.attackLogsLoaded.push(...result.data);
+                        
+                        console.log(`加载攻击日志: 第${this.attackLogsCurrentPage}页, 总数:${this.attackLogsTotal}, 总页数:${this.attackLogsTotalPages}, 已加载:${this.attackLogsLoaded.length}`);
+                        
+                        if (this.attackLogsLoaded.length > 0) {
+                            this.lastAttackLogId = this.attackLogsLoaded[0].id;
+                        }
+                        this.updateLogs(this.attackLogsLoaded);
+                        this.updateMapData(this.attackLogsLoaded);
+                        
+                        if (this.attackLogsCurrentPage < this.attackLogsTotalPages) {
+                            console.log('将在动画播放到一半时加载下一页');
+                        } else {
+                            console.log('所有攻击日志加载完成，共', this.attackLogsLoaded.length, '条');
+                            this.loadIPBlockLogs();
+                        }
+                    }
+                } catch (error) {
+                    console.error('加载日志数据失败:', error);
+                }
+            },
+            
+            async loadNextAttackLogPage() {
+                if (this.attackLogsCurrentPage >= this.attackLogsTotalPages) {
+                    console.log('所有攻击日志加载完成，共', this.attackLogsLoaded.length, '条');
+                    this.loadIPBlockLogs();
+                    return;
+                }
+                
+                try {
+                    this.attackLogsCurrentPage++;
+                    const response = await fetch(`/api/logs?filter=attack&page=${this.attackLogsCurrentPage}&pageSize=${this.attackLogsPageSize}`);
+                    const result = await response.json();
+                    
+                    if (result.success && result.data) {
+                        this.attackLogsLoaded.push(...result.data);
+                        console.log(`加载攻击日志: 第${this.attackLogsCurrentPage}页, 已加载:${this.attackLogsLoaded.length}`);
+                        this.updateLogs(this.attackLogsLoaded);
+                        this.updateMapData(this.attackLogsLoaded);
+                        
+                        if (this.attackLogsCurrentPage < this.attackLogsTotalPages) {
+                            console.log('将在动画播放到一半时加载下一页');
+                        } else {
+                            console.log('所有攻击日志加载完成，共', this.attackLogsLoaded.length, '条');
+                            this.loadIPBlockLogs();
+                        }
+                    }
+                } catch (error) {
+                    console.error('加载日志数据失败:', error);
+                }
+            },
+            
+            async loadIPBlockLogs() {
+                try {
+                    const [blockResponse, observeResponse] = await Promise.all([
+                        fetch(`/api/ip-access-logs?result=block&page=${this.ipBlockLogsCurrentPage}&pageSize=${this.ipBlockLogsPageSize}`),
+                        fetch(`/api/ip-access-logs?result=observe&page=${this.ipBlockLogsCurrentPage}&pageSize=${this.ipBlockLogsPageSize}`)
+                    ]);
+                    
+                    const blockResult = await blockResponse.json();
+                    const observeResult = await observeResponse.json();
+                    
+                    const blockLogs = blockResult.success && blockResult.data ? blockResult.data : [];
+                    const observeLogs = observeResult.success && observeResult.data ? observeResult.data : [];
+                    
+                    const allLogs = [...blockLogs, ...observeLogs].sort((a, b) => b.id - a.id);
+                    
+                    this.ipBlockLogsTotal = (blockResult.total || 0) + (observeResult.total || 0);
+                    this.ipBlockLogsTotalPages = Math.max(blockResult.totalPages || 1, observeResult.totalPages || 1);
+                    
+                    this.ipBlockLogsLoaded = [...allLogs, ...this.ipBlockLogsLoaded];
+                    
+                    console.log(`加载IP封锁日志: 第${this.ipBlockLogsCurrentPage}页, 总数:${this.ipBlockLogsTotal}, 总页数:${this.ipBlockLogsTotalPages}, 已加载:${this.ipBlockLogsLoaded.length}`);
+                    
+                    if (this.ipBlockLogsLoaded.length > 0) {
+                        this.lastIPBlockLogId = this.ipBlockLogsLoaded[0].id;
+                    }
+                    this.updateIPBlockLogs(this.ipBlockLogsLoaded);
+                    
+                    if (this.ipBlockLogsCurrentPage < this.ipBlockLogsTotalPages) {
+                        console.log('将在动画播放到一半时加载下一页');
+                    } else {
+                        console.log('所有IP封锁日志加载完成，共', this.ipBlockLogsLoaded.length, '条');
+                    }
+                } catch (error) {
+                    console.error('加载IP封锁日志失败:', error);
+                }
+            },
+            
+            async loadNextIPBlockLogPage() {
+                if (this.ipBlockLogsCurrentPage >= this.ipBlockLogsTotalPages) {
+                    console.log('所有IP封锁日志加载完成，共', this.ipBlockLogsLoaded.length, '条');
+                    return;
+                }
+                
+                try {
+                    this.ipBlockLogsCurrentPage++;
+                    const [blockResponse, observeResponse] = await Promise.all([
+                        fetch(`/api/ip-access-logs?result=block&page=${this.ipBlockLogsCurrentPage}&pageSize=${this.ipBlockLogsPageSize}`),
+                        fetch(`/api/ip-access-logs?result=observe&page=${this.ipBlockLogsCurrentPage}&pageSize=${this.ipBlockLogsPageSize}`)
+                    ]);
+                    
+                    const blockResult = await blockResponse.json();
+                    const observeResult = await observeResponse.json();
+                    
+                    const blockLogs = blockResult.success && blockResult.data ? blockResult.data : [];
+                    const observeLogs = observeResult.success && observeResult.data ? observeResult.data : [];
+                    
+                    const allLogs = [...blockLogs, ...observeLogs].sort((a, b) => b.id - a.id);
+                    
+                    this.ipBlockLogsLoaded = [...allLogs, ...this.ipBlockLogsLoaded];
+                    console.log(`加载IP封锁日志: 第${this.ipBlockLogsCurrentPage}页, 已加载:${this.ipBlockLogsLoaded.length}`);
+                    this.updateIPBlockLogs(this.ipBlockLogsLoaded);
+                    
+                    if (this.ipBlockLogsCurrentPage < this.ipBlockLogsTotalPages) {
+                        console.log('将在动画播放到一半时加载下一页');
+                    } else {
+                        console.log('所有IP封锁日志加载完成，共', this.ipBlockLogsLoaded.length, '条');
+                    }
+                } catch (error) {
+                    console.error('加载IP封锁日志失败:', error);
+                }
+            },
+            
+            updateIPBlockLogs(logs) {
+                const logsList = document.getElementById('ip-block-logs-list');
+                if (!logsList) return;
+                
+                logsList.innerHTML = '';
+                
+                const displayLogs = logs.slice(0, 20);
+                
+                console.log('IP封锁日志总数:', logs.length);
+                console.log('显示日志数量:', displayLogs.length);
+                console.log('前5条日志ID:', displayLogs.slice(0, 5).map(log => log.id));
+                
+                displayLogs.forEach(log => {
+                    const logItem = document.createElement('div');
+                    logItem.className = 'log-item';
+                    
+                    let resultColor = '#34a853';
+                    let resultText = '通过';
+                    if (log.result === 'block') {
+                        resultColor = '#ff4444';
+                        resultText = '拦截';
+                    } else if (log.result === 'observe') {
+                        resultColor = '#ffb800';
+                        resultText = '观察';
+                    }
+                    
+                    let modeText = '正常模式';
+                    if (log.mode === 'whitelist-only') {
+                        modeText = '白名单模式';
+                    } else if (log.mode === 'blacklist-only') {
+                        modeText = '黑名单模式';
+                    }
+                    
+                    let actionText = '正常访问';
+                    if (log.action === 'whitelist_match') {
+                        actionText = '白名单匹配';
+                    } else if (log.action === 'blacklist_match') {
+                        actionText = '黑名单匹配';
+                    }
+                    
+                    const urlDisplay = log.url ? log.url.substring(0, 60) + (log.url.length > 60 ? '...' : '') : '未知地址';
+                    
+                    const location = log.country ? `${log.country}${log.province ? ' ' + log.province : ''}` : '未知';
+                    
+                    logItem.innerHTML = `
+                        <div class="log-ip">${log.ip}</div>
+                        <div class="log-info">${modeText} - ${actionText} - <span style="color: ${resultColor};">${resultText}</span> - ${location}</div>
+                        <div class="log-url" title="${log.url || ''}">${urlDisplay}</div>
+                        <div class="log-time">${formatUTCTimeToLocal(log.created_at)}</div>
+                    `;
+                    
+                    logsList.appendChild(logItem);
+                });
+                
+                this.updateIPBlockMapData(logs);
+            },
+            
+            updateIPBlockMapData(logs) {
+                if (!this.map) return;
+                
+                if (this.previousTotalIPBlocks === 0) {
+                    this.previousTotalIPBlocks = logs.length || 0;
+                    this.initializeHistoricalIPBlocks(logs);
+                } else {
+                    if (logs.length > 0 && this.lastIPBlockLogId > 0) {
+                        const newLogs = logs.filter(log => log.id > this.lastIPBlockLogId);
+                        
+                        if (newLogs.length > 0) {
+                            this.addIPBlockAnimations(newLogs);
+                            
+                            const newIPBlockers = this.getNewIPBlockers(newLogs);
+                            if (newIPBlockers.length > 0) {
+                                this.addHistoricalIPBlockers(newIPBlockers);
+                            }
+                        }
+                    }
+                    this.previousTotalIPBlocks = logs.length || 0;
+                }
+            },
+            
+            initializeHistoricalIPBlocks(logs) {
+                this.ipBlockAnimations.forEach(animation => {
+                    if (animation.polyline) {
+                        animation.polyline.remove();
+                    }
+                    if (animation.marker) {
+                        animation.marker.remove();
+                    }
+                });
+                this.ipBlockAnimations = [];
+                
+                const serverLatLng = this.serverLocation 
+                    ? [this.serverLocation.latitude, this.serverLocation.longitude]
+                    : [35.86166, 104.195397];
+                
+                const mergedIPBlocks = [];
+                const seenIPs = new Set();
+                
+                for (let i = logs.length - 1; i >= 0; i--) {
+                    const log = logs[i];
+                    const sourceLatLng = [log.latitude || 0, log.longitude || 0];
+                    
+                    if (sourceLatLng[0] === 0 && sourceLatLng[1] === 0) continue;
+                    
+                    const sourceIp = log.ip || '';
+                    if (!sourceIp) continue;
+                    
+                    if (seenIPs.has(sourceIp)) continue;
+                    
+                    const location = `${log.country || ''} ${log.province || ''} ${log.city || ''}`.trim();
+                    
+                    mergedIPBlocks.push({
+                        sourceLatLng: sourceLatLng,
+                        targetLatLng: serverLatLng,
+                        sourceIp: sourceIp,
+                        location: location,
+                        progress: 0,
+                        polyline: null,
+                        marker: null,
+                        isRealtime: false,
+                        arcPath: this.calculateArcPath(sourceLatLng, serverLatLng)
+                    });
+                    seenIPs.add(sourceIp);
+                }
+                
+                this.ipBlockAnimations = mergedIPBlocks;
+                this.currentIPBlockIndex = 0;
+                
+                this.addServerMarker();
+                
+                this.map.setView([20, 0], 2);
+                
+                this.startIPBlockAnimations();
+            },
+            
+            getNewIPBlockers(newLogs) {
+                const existingIPs = new Set(this.ipBlockAnimations.map(a => a.sourceIp));
+                const newIPBlockers = [];
+                
+                for (const log of newLogs) {
+                    const sourceIp = log.ip || '';
+                    if (!sourceIp) continue;
+                    
+                    if (!existingIPs.has(sourceIp)) {
+                        const sourceLatLng = [log.latitude || 0, log.longitude || 0];
+                        
+                        if (sourceLatLng[0] === 0 && sourceLatLng[1] === 0) continue;
+                        
+                        const location = `${log.country || ''} ${log.province || ''} ${log.city || ''}`.trim();
+                        
+                        newIPBlockers.push({
+                            sourceLatLng: sourceLatLng,
+                            targetLatLng: this.serverLocation 
+                                ? [this.serverLocation.latitude, this.serverLocation.longitude]
+                                : [35.86166, 104.195397],
+                            sourceIp: sourceIp,
+                            location: location,
+                            progress: 0,
+                            polyline: null,
+                            marker: null,
+                            isRealtime: false,
+                            arcPath: this.calculateArcPath(sourceLatLng, this.serverLocation 
+                                ? [this.serverLocation.latitude, this.serverLocation.longitude]
+                                : [35.86166, 104.195397])
+                        });
+                        
+                        existingIPs.add(sourceIp);
+                    }
+                }
+                
+                return newIPBlockers;
+            },
+            
+            addHistoricalIPBlockers(newIPBlockers) {
+                for (const ipBlocker of newIPBlockers) {
+                    this.ipBlockAnimations.unshift(ipBlocker);
+                }
+                
+                if (this.ipBlockAnimations.length > 0) {
+                    this.currentIPBlockIndex = 0;
+                    this.startIPBlockAnimations();
+                }
+            },
+            
+            updateLogs(logs) {
+                const logsList = document.getElementById('logs-list');
+                logsList.innerHTML = '';
+                
+                const displayLogs = logs.slice(0, 20);
+                
+                displayLogs.forEach(log => {
+                    const logItem = document.createElement('div');
+                    logItem.className = 'log-item';
+                    
+                    const location = log.country ? `${log.country}${log.province ? ' ' + log.province : ''}` : '未知';
+                    
+                    let attackInfo = log.attackType || '未知攻击';
+                    if (log.rules && log.rules !== '无') {
+                        try {
+                            const rules = JSON.parse('[' + log.rules + ']');
+                            if (rules && rules.length > 0) {
+                                const messages = rules.map(r => r.message).filter(m => m);
+                                if (messages.length > 0) {
+                                    attackInfo = messages.join(' | ');
+                                }
+                            }
+                        } catch (e) {
+                        }
+                    }
+                    
+                    logItem.innerHTML = `
+                        <div class="log-ip">${log.ip}</div>
+                        <div class="log-info">${attackInfo} - ${location}</div>
+                        <div class="log-time">${formatUTCTimeToLocal(log.time)}</div>
+                    `;
+                    
+                    logsList.appendChild(logItem);
+                });
+            },
+            
+            updateMapData(logs) {
+                if (!this.map) return;
+                
+                if (this.previousTotalAttacks === 0) {
+                    this.previousTotalAttacks = logs.length || 0;
+                    this.initializeHistoricalAttacks(logs);
+                } else {
+                    if (logs.length > 0 && this.lastAttackLogId > 0) {
+                        const newLogs = logs.filter(log => log.id > this.lastAttackLogId);
+                        
+                        if (newLogs.length > 0) {
+                            this.addRealtimeAttacks(newLogs);
+                            
+                            const newAttackers = this.getNewAttackers(newLogs);
+                            if (newAttackers.length > 0) {
+                                this.addHistoricalAttackers(newAttackers);
+                            }
+                        }
+                    }
+                    this.previousTotalAttacks = logs.length || 0;
+                }
+            },
+            
+            initializeHistoricalAttacks(logs) {
+                this.attackAnimations.forEach(animation => {
+                    if (animation.polyline) {
+                        animation.polyline.remove();
+                    }
+                    if (animation.marker) {
+                        animation.marker.remove();
+                    }
+                });
+                this.attackAnimations = [];
+                
+                const serverLatLng = this.serverLocation 
+                    ? [this.serverLocation.latitude, this.serverLocation.longitude]
+                    : [35.86166, 104.195397];
+                
+                const mergedAttacks = [];
+                const seenIPs = new Set();
+                
+                for (let i = logs.length - 1; i >= 0; i--) {
+                    const log = logs[i];
+                    const sourceLatLng = [log.latitude || 0, log.longitude || 0];
+                    
+                    if (sourceLatLng[0] === 0 && sourceLatLng[1] === 0) continue;
+                    
+                    const sourceIp = log.ip || '';
+                    if (!sourceIp) continue;
+                    
+                    if (seenIPs.has(sourceIp)) continue;
+                    
+                    const location = `${log.country || ''} ${log.province || ''} ${log.city || ''}`.trim();
+                    
+                    mergedAttacks.push({
+                        sourceLatLng: sourceLatLng,
+                        targetLatLng: serverLatLng,
+                        sourceIp: sourceIp,
+                        location: location,
+                        progress: 0,
+                        polyline: null,
+                        marker: null,
+                        isRealtime: false,
+                        arcPath: this.calculateArcPath(sourceLatLng, serverLatLng)
+                    });
+                    seenIPs.add(sourceIp);
+                }
+                
+                this.attackAnimations = mergedAttacks;
+                this.currentAttackIndex = 0;
+                
+                this.addServerMarker();
+                
+                this.map.setView([20, 0], 2);
+                
+                this.startAttackAnimations();
+            },
+            
+            getNewAttackers(newLogs) {
+                const existingIPs = new Set(this.attackAnimations.map(a => a.sourceIp));
+                const newAttackers = [];
+                
+                for (const log of newLogs) {
+                    const sourceIp = log.ip || '';
+                    if (!sourceIp) continue;
+                    
+                    if (!existingIPs.has(sourceIp)) {
+                        const sourceLatLng = [log.latitude || 0, log.longitude || 0];
+                        
+                        if (sourceLatLng[0] === 0 && sourceLatLng[1] === 0) continue;
+                        
+                        const location = `${log.country || ''} ${log.province || ''} ${log.city || ''}`.trim();
+                        
+                        newAttackers.push({
+                            sourceLatLng: sourceLatLng,
+                            targetLatLng: this.serverLocation 
+                                ? [this.serverLocation.latitude, this.serverLocation.longitude]
+                                : [35.86166, 104.195397],
+                            sourceIp: sourceIp,
+                            location: location,
+                            progress: 0,
+                            polyline: null,
+                            marker: null,
+                            isRealtime: false,
+                            arcPath: this.calculateArcPath(sourceLatLng, this.serverLocation 
+                                ? [this.serverLocation.latitude, this.serverLocation.longitude]
+                                : [35.86166, 104.195397])
+                        });
+                        
+                        existingIPs.add(sourceIp);
+                    }
+                }
+                
+                return newAttackers;
+            },
+            
+            addHistoricalAttackers(newAttackers) {
+                for (const attacker of newAttackers) {
+                    this.attackAnimations.unshift(attacker);
+                }
+                
+                if (this.attackAnimations.length > 0) {
+                    this.currentAttackIndex = 0;
+                    this.startAttackAnimations();
+                }
+            },
+            
+            addRealtimeAttacks(newLogs) {
+                const serverLatLng = this.serverLocation 
+                    ? [this.serverLocation.latitude, this.serverLocation.longitude]
+                    : [35.86166, 104.195397];
+                
+                const existingIPs = new Set(this.attackAnimations.map(a => a.sourceIp));
+                
+                for (const log of newLogs) {
+                    const sourceIp = log.ip || '';
+                    if (!sourceIp) continue;
+                    
+                    if (existingIPs.has(sourceIp)) {
+                        console.log('IP已存在，跳过实时动画:', sourceIp);
+                        continue;
+                    }
+                    
+                    const sourceLatLng = [log.latitude || 0, log.longitude || 0];
+                    
+                    if (sourceLatLng[0] === 0 && sourceLatLng[1] === 0) continue;
+                    
+                    const location = `${log.country || ''} ${log.province || ''} ${log.city || ''}`.trim();
+                    
+                    const attack = {
+                        sourceLatLng: sourceLatLng,
+                        targetLatLng: serverLatLng,
+                        sourceIp: sourceIp,
+                        location: location,
+                        progress: 0,
+                        polyline: null,
+                        marker: null,
+                        isRealtime: true,
+                        arcPath: this.calculateArcPath(sourceLatLng, serverLatLng)
+                    };
+                    
+                    this.attackAnimations.push(attack);
+                    this.playRealtimeAttack(attack);
+                    existingIPs.add(sourceIp);
+                }
+            },
+            
+            playRealtimeAttack(attack) {
+                const marker = L.circleMarker(attack.sourceLatLng, {
+                    radius: 6,
+                    fillColor: '#ff0000',
+                    color: '#ff0000',
+                    weight: 2,
+                    opacity: 1,
+                    fillOpacity: 0.8
+                }).addTo(this.map);
+                
+                marker.bindTooltip(`【实时】${attack.sourceIp}\n${attack.location}`, {
+                    permanent: true,
+                    direction: 'top',
+                    offset: [0, -10],
+                    className: 'realtime-tooltip'
+                });
+                
+                marker.bringToBack();
+                
+                attack.marker = marker;
+                
+                let progress = 0;
+                const animationSpeed = 8;
+                
+                const animateInterval = setInterval(() => {
+                    progress += animationSpeed;
+                    
+                    if (attack.polyline) {
+                        attack.polyline.remove();
+                    }
+                    
+                    const currentPathIndex = Math.floor((progress / 100) * attack.arcPath.length);
+                    const currentPath = attack.arcPath.slice(0, currentPathIndex + 1);
+                    
+                    attack.polyline = L.polyline(
+                        currentPath,
+                        {
+                            color: '#ff9900',
+                            weight: 1.5,
+                            opacity: 1,
+                            className: 'realtime-line'
+                        }
+                    ).addTo(this.map);
+                    
+                    attack.polyline.bringToFront();
+                    
+                    if (attack.marker) {
+                        attack.marker.bringToBack();
+                    }
+                    
+                    if (progress >= 100) {
+                        clearInterval(animateInterval);
+                        
+                        setTimeout(() => {
+                            if (attack.polyline) {
+                                attack.polyline.remove();
+                                attack.polyline = null;
+                            }
+                            if (attack.marker) {
+                                attack.marker.remove();
+                                attack.marker = null;
+                            }
+                            
+                            const index = this.attackAnimations.indexOf(attack);
+                            if (index > -1) {
+                                this.attackAnimations.splice(index, 1);
+                            }
+                        }, 500);
+                    }
+                }, 50);
+            },
+            
+            startAttackAnimations() {
+                const playNextAttack = () => {
+                    if (this.attackAnimations.length === 0) return;
+                    
+                    const currentAnimation = this.attackAnimations[this.currentAttackIndex];
+                    
+                    if (currentAnimation && !currentAnimation.isRealtime) {
+                        const marker = L.circleMarker(currentAnimation.sourceLatLng, {
+                            radius: 6,
+                            fillColor: '#ff0000',
+                            color: '#ff0000',
+                            weight: 2,
+                            opacity: 1,
+                            fillOpacity: 0.8
+                        }).addTo(this.map);
+                        
+                        marker.bindTooltip(`${currentAnimation.sourceIp}\n${currentAnimation.location}`, {
+                            permanent: true,
+                            direction: 'top',
+                            offset: [0, -10],
+                            className: 'attack-tooltip'
+                        });
+                        
+                        marker.bringToBack();
+                        
+                        currentAnimation.marker = marker;
+                        
+                        let progress = 0;
+                        const animationSpeed = 8;
+                        let hasTriggeredNextPage = false;
+                        
+                        const animateInterval = setInterval(() => {
+                            progress += animationSpeed;
+                            
+                            if (progress >= 50 && !hasTriggeredNextPage) {
+                                hasTriggeredNextPage = true;
+                                this.loadNextAttackLogPage();
+                            }
+                            
+                            if (currentAnimation.polyline) {
+                                currentAnimation.polyline.remove();
+                            }
+                            
+                            const currentPathIndex = Math.floor((progress / 100) * currentAnimation.arcPath.length);
+                            const currentPath = currentAnimation.arcPath.slice(0, currentPathIndex + 1);
+                            
+                            currentAnimation.polyline = L.polyline(
+                                currentPath,
+                                {
+                                    color: '#ff9900',
+                                    weight: 1.5,
+                                    opacity: 1,
+                                    className: 'attack-line'
+                                }
+                            ).addTo(this.map);
+                            
+                            currentAnimation.polyline.bringToFront();
+                            
+                            if (currentAnimation.marker) {
+                                currentAnimation.marker.bringToBack();
+                            }
+                            
+                            if (progress >= 100) {
+                                clearInterval(animateInterval);
+                                
+                                setTimeout(() => {
+                                    if (currentAnimation.polyline) {
+                                        currentAnimation.polyline.remove();
+                                        currentAnimation.polyline = null;
+                                    }
+                                    if (currentAnimation.marker) {
+                                        currentAnimation.marker.remove();
+                                        currentAnimation.marker = null;
+                                    }
+                                    
+                                    this.currentAttackIndex = (this.currentAttackIndex + 1) % this.attackAnimations.length;
+                                    setTimeout(playNextAttack, 500);
+                                }, 1000);
+                            }
+                        }, 50);
+                    } else {
+                        this.currentAttackIndex = (this.currentAttackIndex + 1) % this.attackAnimations.length;
+                        setTimeout(playNextAttack, 500);
+                    }
+                };
+                
+                playNextAttack();
+            },
+            
+            addIPBlockAnimations(newLogs) {
+                const serverLatLng = this.serverLocation 
+                    ? [this.serverLocation.latitude, this.serverLocation.longitude]
+                    : [35.86166, 104.195397];
+                
+                console.log('添加IP封锁动画，日志数量:', newLogs.length);
+                
+                const existingIPs = new Set(this.ipBlockAnimations.map(a => a.sourceIp));
+                
+                for (const log of newLogs) {
+                    const sourceIp = log.ip || '';
+                    if (!sourceIp) continue;
+                    
+                    if (existingIPs.has(sourceIp)) {
+                        console.log('IP已存在，跳过IP封锁动画:', sourceIp);
+                        continue;
+                    }
+                    
+                    const sourceLatLng = [log.latitude || 0, log.longitude || 0];
+                    console.log('IP封锁日志:', sourceIp, '经纬度:', sourceLatLng);
+                    
+                    if (sourceLatLng[0] === 0 && sourceLatLng[1] === 0) {
+                        console.log('跳过IP封锁日志，经纬度为0:', sourceIp);
+                        continue;
+                    }
+                    
+                    const location = `${log.country || ''} ${log.province || ''} ${log.city || ''}`.trim();
+                    
+                    const ipBlock = {
+                        sourceLatLng: sourceLatLng,
+                        targetLatLng: serverLatLng,
+                        sourceIp: sourceIp,
+                        location: location,
+                        progress: 0,
+                        polyline: null,
+                        marker: null,
+                        isRealtime: true,
+                        arcPath: this.calculateArcPath(sourceLatLng, serverLatLng)
+                    };
+                    
+                    this.ipBlockAnimations.push(ipBlock);
+                    this.playIPBlockAnimation(ipBlock);
+                    existingIPs.add(sourceIp);
+                }
+                
+                if (this.ipBlockAnimations.length > 0 && this.currentIPBlockIndex === 0) {
+                    this.startIPBlockAnimations();
+                }
+            },
+            
+            playIPBlockAnimation(ipBlock) {
+                const marker = L.circleMarker(ipBlock.sourceLatLng, {
+                    radius: 6,
+                    fillColor: '#ffb800',
+                    color: '#ffb800',
+                    weight: 2,
+                    opacity: 1,
+                    fillOpacity: 0.8
+                }).addTo(this.map);
+                
+                marker.bindTooltip(`【IP封锁】${ipBlock.sourceIp}\n${ipBlock.location}`, {
+                    permanent: true,
+                    direction: 'top',
+                    offset: [0, -10],
+                    className: 'ipblock-tooltip'
+                });
+                
+                marker.bringToBack();
+                
+                ipBlock.marker = marker;
+                
+                let progress = 0;
+                const animationSpeed = 8;
+                
+                const animateInterval = setInterval(() => {
+                    progress += animationSpeed;
+                    
+                    if (ipBlock.polyline) {
+                        ipBlock.polyline.remove();
+                    }
+                    
+                    const currentPathIndex = Math.floor((progress / 100) * ipBlock.arcPath.length);
+                    const currentPath = ipBlock.arcPath.slice(0, currentPathIndex + 1);
+                    
+                    ipBlock.polyline = L.polyline(
+                        currentPath,
+                        {
+                            color: '#ffcc00',
+                            weight: 1.5,
+                            opacity: 1,
+                            className: 'ipblock-line'
+                        }
+                    ).addTo(this.map);
+                    
+                    ipBlock.polyline.bringToFront();
+                    
+                    if (ipBlock.marker) {
+                        ipBlock.marker.bringToBack();
+                    }
+                    
+                    if (progress >= 100) {
+                        clearInterval(animateInterval);
+                        
+                        setTimeout(() => {
+                            if (ipBlock.polyline) {
+                                ipBlock.polyline.remove();
+                                ipBlock.polyline = null;
+                            }
+                            if (ipBlock.marker) {
+                                ipBlock.marker.remove();
+                                ipBlock.marker = null;
+                            }
+                        }, 500);
+                    }
+                }, 50);
+            },
+            
+            startIPBlockAnimations() {
+                const playNextIPBlock = () => {
+                    if (this.ipBlockAnimations.length === 0) {
+                        return;
+                    }
+                    
+                    const currentAnimation = this.ipBlockAnimations[this.currentIPBlockIndex];
+                    
+                    if (currentAnimation && !currentAnimation.isRealtime) {
+                        const marker = L.circleMarker(currentAnimation.sourceLatLng, {
+                            radius: 6,
+                            fillColor: '#ffb800',
+                            color: '#ffb800',
+                            weight: 2,
+                            opacity: 1,
+                            fillOpacity: 0.8
+                        }).addTo(this.map);
+                        
+                        marker.bindTooltip(`【IP封锁】${currentAnimation.sourceIp}\n${currentAnimation.location}`, {
+                            permanent: true,
+                            direction: 'top',
+                            offset: [0, -10],
+                            className: 'ipblock-tooltip'
+                        });
+                        
+                        marker.bringToBack();
+                        
+                        currentAnimation.marker = marker;
+                        
+                        let progress = 0;
+                        const animationSpeed = 8;
+                        let hasTriggeredNextPage = false;
+                        
+                        const animateInterval = setInterval(() => {
+                            progress += animationSpeed;
+                            
+                            if (progress >= 50 && !hasTriggeredNextPage) {
+                                hasTriggeredNextPage = true;
+                                this.loadNextIPBlockLogPage();
+                            }
+                            
+                            if (currentAnimation.polyline) {
+                                currentAnimation.polyline.remove();
+                            }
+                            
+                            const currentPathIndex = Math.floor((progress / 100) * currentAnimation.arcPath.length);
+                            const currentPath = currentAnimation.arcPath.slice(0, currentPathIndex + 1);
+                            
+                            currentAnimation.polyline = L.polyline(
+                                currentPath,
+                                {
+                                    color: '#ffcc00',
+                                    weight: 1.5,
+                                    opacity: 1,
+                                    className: 'ipblock-line'
+                                }
+                            ).addTo(this.map);
+                            
+                            currentAnimation.polyline.bringToFront();
+                            
+                            if (currentAnimation.marker) {
+                                currentAnimation.marker.bringToBack();
+                            }
+                            
+                            if (progress >= 100) {
+                                clearInterval(animateInterval);
+                                
+                                setTimeout(() => {
+                                    if (currentAnimation.polyline) {
+                                        currentAnimation.polyline.remove();
+                                        currentAnimation.polyline = null;
+                                    }
+                                    if (currentAnimation.marker) {
+                                        currentAnimation.marker.remove();
+                                        currentAnimation.marker = null;
+                                    }
+                                    
+                                    this.currentIPBlockIndex = (this.currentIPBlockIndex + 1) % this.ipBlockAnimations.length;
+                                    setTimeout(playNextIPBlock, 500);
+                                }, 1000);
+                            }
+                        }, 50);
+                    } else {
+                        this.currentIPBlockIndex = (this.currentIPBlockIndex + 1) % this.ipBlockAnimations.length;
+                        setTimeout(playNextIPBlock, 500);
+                    }
+                };
+                
+                playNextIPBlock();
+            },
+            
+            calculateArcPath(start, end) {
+                const points = [];
+                const steps = 200;
+                
+                for (let i = 0; i <= steps; i++) {
+                    const t = i / steps;
+                    const lat = start[0] + (end[0] - start[0]) * t;
+                    const lng = start[1] + (end[1] - start[1]) * t;
+                    
+                    const arcHeight = 15;
+                    const arcOffset = Math.sin(t * Math.PI) * arcHeight;
+                    
+                    points.push([lat + arcOffset, lng]);
+                }
+                
+                return points;
+            },
+            
+            updateTraffic(history) {
+                try {
+                    const trafficHistory = history.trafficHistory || [];
+                    
+                    if (trafficHistory.length === 0) {
+                        document.getElementById('dashboard-traffic').textContent = '0 B/s';
+                        document.getElementById('dashboard-traffic-out').textContent = '0 B/s';
+                        this.renderDashboardTrafficChart();
+                        return;
+                    }
+                    
+                    const lastTraffic = trafficHistory[trafficHistory.length - 1];
+                    const inboundPerSecond = lastTraffic.inbound || 0;
+                    const outboundPerSecond = lastTraffic.outbound || 0;
+                    
+                    this.trafficHistory = trafficHistory.map(item => ({
+                        time: item.time,
+                        inbound: item.inbound,
+                        outbound: item.outbound
+                    }));
+                    
+                    document.getElementById('dashboard-traffic').textContent = this.formatTraffic(inboundPerSecond);
+                    document.getElementById('dashboard-traffic-out').textContent = this.formatTraffic(outboundPerSecond);
+                    
+                    this.renderDashboardTrafficChart();
+                } catch (error) {
+                    console.error('更新流量失败:', error);
+                }
+            },
+            
+            updateQPS(history) {
+                try {
+                    const qpsHistory = history.qpsHistory || [];
+                    
+                    if (qpsHistory.length === 0) {
+                        document.getElementById('dashboard-qps').textContent = '0';
+                        this.renderDashboardQPSChart();
+                        return;
+                    }
+                    
+                    const lastQPS = qpsHistory[qpsHistory.length - 1];
+                    const qps = lastQPS.qps || 0;
+                    
+                    this.qpsHistory = qpsHistory.map(item => ({
+                        time: item.time,
+                        value: item.qps
+                    }));
+                    
+                    document.getElementById('dashboard-qps').textContent = qps;
+                    
+                    this.renderDashboardQPSChart();
+                } catch (error) {
+                    console.error('更新QPS失败:', error);
+                }
+            },
+            
+            formatTraffic(bytes) {
+                if (bytes === 0) return '0 B/s';
+                const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+                const k = 1024;
+                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                const value = bytes / Math.pow(k, i);
+                return value.toFixed(2) + ' ' + units[i];
+            },
+            
+            renderDashboardTrafficChart() {
+                const chartContainer = document.getElementById('dashboard-traffic-chart');
+                if (!chartContainer) return;
+                
+                if (!this.dashboardTrafficChart) {
+                    this.dashboardTrafficChart = echarts.init(chartContainer);
+                    window.addEventListener('resize', () => {
+                        if (this.dashboardTrafficChart) {
+                            this.dashboardTrafficChart.resize();
+                        }
+                    });
+                }
+                
+                const maxBars = 35;
+                const displayHistory = this.trafficHistory.slice(-maxBars);
+                
+                const times = displayHistory.map(d => d.time || '');
+                const inboundValues = displayHistory.map(d => d.inbound || 0);
+                const outboundValues = displayHistory.map(d => d.outbound || 0);
+                
+                const maxTraffic = Math.max(...inboundValues, ...outboundValues, 1);
+                const minVisibleValue = maxTraffic * 0.3;
+                const displayInboundValues = inboundValues.map(v => v === 0 ? minVisibleValue : v);
+                const displayOutboundValues = outboundValues.map(v => v === 0 ? minVisibleValue : v);
+                
+                const formatSpeed = (bytes) => {
+                    if (bytes >= 1024 * 1024) {
+                        return (bytes / (1024 * 1024)).toFixed(2) + ' MB/s';
+                    } else if (bytes >= 1024) {
+                        return (bytes / 1024).toFixed(2) + ' KB/s';
+                    }
+                    return bytes + ' B/s';
+                };
+                
+                const option = {
+                    grid: {
+                        left: 0,
+                        right: 0,
+                        top: 0,
+                        bottom: 0,
+                        containLabel: false
+                    },
+                    tooltip: {
+                        trigger: 'axis',
+                        axisPointer: {
+                            type: 'line'
+                        },
+                        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                        borderColor: '#00e5ff',
+                        borderWidth: 1,
+                        padding: [6, 10],
+                        textStyle: {
+                            color: '#00e5ff',
+                            fontSize: 11
+                        },
+                        formatter: function(params) {
+                            if (params && params.length > 0) {
+                                const dataIndex = params[0].dataIndex;
+                                const inboundValue = inboundValues[dataIndex];
+                                const outboundValue = outboundValues[dataIndex];
+                                return `时间: ${params[0].axisValue}<br/>入站: ${formatSpeed(inboundValue)}<br/>出站: ${formatSpeed(outboundValue)}`;
+                            }
+                            return '';
+                        }
+                    },
+                    xAxis: {
+                        type: 'category',
+                        data: times,
+                        show: false,
+                        boundaryGap: true
+                    },
+                    yAxis: {
+                        type: 'value',
+                        show: false,
+                        min: 0,
+                        max: maxTraffic * 1.1
+                    },
+                    series: [
+                        {
+                            name: '入站',
+                            type: 'line',
+                            data: displayInboundValues,
+                            smooth: true,
+                            showSymbol: false,
+                            lineStyle: {
+                                width: 2,
+                                color: '#00e5ff'
+                            },
+                            areaStyle: {
+                                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                                    { offset: 0, color: 'rgba(0, 229, 255, 0.4)' },
+                                    { offset: 1, color: 'rgba(0, 229, 255, 0.1)' }
+                                ])
+                            }
+                        },
+                        {
+                            name: '出站',
+                            type: 'line',
+                            data: displayOutboundValues,
+                            smooth: true,
+                            showSymbol: false,
+                            lineStyle: {
+                                width: 2,
+                                color: '#34a853'
+                            },
+                            areaStyle: {
+                                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                                    { offset: 0, color: 'rgba(52, 168, 83, 0.4)' },
+                                    { offset: 1, color: 'rgba(52, 168, 83, 0.1)' }
+                                ])
+                            }
+                        }
+                    ]
+                };
+                
+                this.dashboardTrafficChart.setOption(option);
+            },
+            
+            renderDashboardQPSChart(highlightIndex = -1) {
+                const chartContainer = document.getElementById('dashboard-qps-chart');
+                if (!chartContainer) return;
+                
+                if (!this.dashboardQpsChart) {
+                    this.dashboardQpsChart = echarts.init(chartContainer);
+                    window.addEventListener('resize', () => {
+                        if (this.dashboardQpsChart) {
+                            this.dashboardQpsChart.resize();
+                        }
+                    });
+                }
+                
+                const qpsHistory = this.qpsHistory || [];
+                
+                const maxBars = 30;
+                const displayHistory = qpsHistory.slice(-maxBars);
+                
+                const times = displayHistory.map(d => d.time || '');
+                const displayValues = displayHistory.map(d => d.value || 0);
+                const originalValues = [...displayValues];
+                
+                const recentHistory = qpsHistory.slice(-20);
+                const maxQPS = Math.max(...recentHistory.map(d => d.value), 1);
+                const minVisibleValue = maxQPS * 0.2;
+                const values = displayValues.map(v => v === 0 ? minVisibleValue : v);
+                
+                const option = {
+                    grid: {
+                        left: 0,
+                        right: 0,
+                        top: 0,
+                        bottom: 0,
+                        containLabel: false
+                    },
+                    tooltip: {
+                        trigger: 'axis',
+                        axisPointer: {
+                            type: 'shadow'
+                        },
+                        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                        borderColor: '#00e5ff',
+                        borderWidth: 1,
+                        padding: [6, 10],
+                        textStyle: {
+                            color: '#00e5ff',
+                            fontSize: 11
+                        },
+                        formatter: function(params) {
+                            if (params && params.length > 0) {
+                                const param = params[0];
+                                const dataIndex = param.dataIndex;
+                                const originalValue = originalValues[dataIndex];
+                                return `时间: ${param.axisValue}<br/>QPS: ${originalValue}`;
+                            }
+                            return '';
+                        }
+                    },
+                    xAxis: {
+                        type: 'category',
+                        data: times,
+                        show: false,
+                        boundaryGap: true
+                    },
+                    yAxis: {
+                        type: 'value',
+                        show: false,
+                        min: 0,
+                        max: maxQPS * 1.1,
+                        scale: false
+                    },
+                    series: [
+                        {
+                            type: 'bar',
+                            data: values,
+                            barWidth: '70%',
+                            barCategoryGap: '20%',
+                            itemStyle: {
+                                borderRadius: [1, 1, 0, 0],
+                                borderColor: '#00e5ff',
+                                borderWidth: 1,
+                                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                                    { offset: 0, color: 'rgba(0, 229, 255, 0.6)' },
+                                    { offset: 1, color: 'rgba(0, 229, 255, 0.1)' }
+                                ])
+                            },
+                            emphasis: {
+                                itemStyle: {
+                                    borderRadius: [1, 1, 0, 0],
+                                    borderColor: '#00ffff',
+                                    borderWidth: 1,
+                                    color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                                        { offset: 0, color: 'rgba(0, 255, 255, 0.8)' },
+                                        { offset: 1, color: 'rgba(0, 255, 255, 0.2)' }
+                                    ])
+                                }
+                            },
+                            animationDuration: 300,
+                            animationEasing: 'cubicOut'
+                        }
+                    ]
+                };
+                
+                this.dashboardQpsChart.setOption(option);
+            },
+            
+            updateAttack(history) {
+                try {
+                    const attackHistory = history.attackHistory || [];
+                    
+                    if (attackHistory.length === 0) {
+                        document.getElementById('dashboard-attack-count').textContent = '0';
+                        this.renderDashboardAttackChart();
+                        return;
+                    }
+                    
+                    const lastAttack = attackHistory[attackHistory.length - 1];
+                    const attacks = lastAttack.count || 0;
+                    
+                    this.attackHistory = attackHistory.map(item => ({
+                        time: item.time,
+                        attacks: item.count
+                    }));
+                    
+                    document.getElementById('dashboard-attack-count').textContent = attacks;
+                    
+                    this.renderDashboardAttackChart();
+                } catch (error) {
+                    console.error('更新攻击失败:', error);
+                }
+            },
+            
+            renderDashboardAttackChart() {
+                const chartContainer = document.getElementById('dashboard-attack-chart');
+                if (!chartContainer) return;
+                
+                if (!this.dashboardAttackChart) {
+                    this.dashboardAttackChart = echarts.init(chartContainer);
+                    window.addEventListener('resize', () => {
+                        if (this.dashboardAttackChart) {
+                            this.dashboardAttackChart.resize();
+                        }
+                    });
+                }
+                
+                const maxBars = 35;
+                const displayHistory = this.attackHistory.slice(-maxBars);
+                
+                const times = displayHistory.map(d => d.time || '');
+                const attackValues = displayHistory.map(d => d.attacks || 0);
+                
+                const maxAttack = Math.max(...attackValues, 1);
+                
+                const option = {
+                    grid: {
+                        left: 0,
+                        right: 0,
+                        top: 0,
+                        bottom: 0,
+                        containLabel: false
+                    },
+                    tooltip: {
+                        trigger: 'axis',
+                        axisPointer: {
+                            type: 'line'
+                        },
+                        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                        borderColor: '#ff4444',
+                        borderWidth: 1,
+                        padding: [6, 10],
+                        textStyle: {
+                            color: '#ff4444',
+                            fontSize: 11
+                        },
+                        formatter: function(params) {
+                            if (params && params.length > 0) {
+                                const param = params[0];
+                                return `时间: ${param.axisValue}<br/>攻击: ${param.value}`;
+                            }
+                            return '';
+                        }
+                    },
+                    xAxis: {
+                        type: 'category',
+                        data: times,
+                        show: false,
+                        boundaryGap: true
+                    },
+                    yAxis: {
+                        type: 'value',
+                        show: false,
+                        min: 0,
+                        max: maxAttack * 1.1
+                    },
+                    series: [
+                        {
+                            name: '攻击',
+                            type: 'line',
+                            data: attackValues,
+                            smooth: true,
+                            showSymbol: false,
+                            lineStyle: {
+                                width: 2,
+                                color: '#ff4444'
+                            },
+                            areaStyle: {
+                                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                                    { offset: 0, color: 'rgba(255, 68, 68, 0.4)' },
+                                    { offset: 1, color: 'rgba(255, 68, 68, 0.1)' }
+                                ])
+                            }
+                        }
+                    ]
+                };
+                
+                this.dashboardAttackChart.setOption(option);
+            },
+            
+            showTooltip(x, y, qps, time) {
+                if (!this.tooltipElement) {
+                    this.tooltipElement = document.createElement('div');
+                    this.tooltipElement.style.cssText = `
+                        position: fixed;
+                        background: rgba(0, 0, 0, 0.8);
+                        color: #00e5ff;
+                        padding: 8px 12px;
+                        border-radius: 4px;
+                        font-size: 12px;
+                        pointer-events: none;
+                        z-index: 10000;
+                        border: 1px solid rgba(0, 229, 255, 0.5);
+                        box-shadow: 0 0 10px rgba(0, 229, 255, 0.3);
+                    `;
+                    document.body.appendChild(this.tooltipElement);
+                }
+                
+                this.tooltipElement.textContent = `QPS: ${qps}\n时间: ${time}`;
+                this.tooltipElement.style.left = `${x + 10}px`;
+                this.tooltipElement.style.top = `${y - 40}px`;
+            },
+            
+            startAutoRefresh() {
+                this.refreshInterval = setInterval(async () => {
+                    await this.loadStats();
+                    await this.loadNewLogs();
+                }, 2000);
+            },
+            
+            async loadNewLogs() {
+                try {
+                    const [attackResponse, blockResponse, observeResponse] = await Promise.all([
+                        fetch('/api/logs?filter=attack&page=1&pageSize=50'),
+                        fetch('/api/ip-access-logs?result=block&page=1&pageSize=50'),
+                        fetch('/api/ip-access-logs?result=observe&page=1&pageSize=50')
+                    ]);
+                    
+                    const attackResult = await attackResponse.json();
+                    const blockResult = await blockResponse.json();
+                    const observeResult = await observeResponse.json();
+                    
+                    let hasNewAttack = false;
+                    let hasNewIPBlock = false;
+                    
+                    if (attackResult.success && attackResult.data) {
+                        const newLogs = attackResult.data;
+                        
+                        if (newLogs.length > 0 && this.attackLogsLoaded.length > 0) {
+                            const latestLoadedId = this.attackLogsLoaded[0].id;
+                            const newAttackLogs = newLogs.filter(log => log.id > latestLoadedId);
+                            
+                            if (newAttackLogs.length > 0) {
+                                console.log('发现新的攻击日志:', newAttackLogs.length, '条');
+                                hasNewAttack = true;
+                                
+                                const latestNewLogId = newAttackLogs[0].id;
+                                if (latestNewLogId > this.lastAttackLogId) {
+                                    this.lastAttackLogId = latestNewLogId;
+                                }
+                                
+                                this.attackLogsLoaded = [...newAttackLogs, ...this.attackLogsLoaded];
+                                this.updateLogs(this.attackLogsLoaded);
+                                this.updateMapData(this.attackLogsLoaded);
+                            }
+                        } else if (newLogs.length > 0 && this.attackLogsLoaded.length === 0) {
+                            console.log('首次加载攻击日志:', newLogs.length, '条');
+                            this.attackLogsLoaded = [...newLogs];
+                            this.lastAttackLogId = newLogs[0].id;
+                            this.updateLogs(this.attackLogsLoaded);
+                            this.updateMapData(this.attackLogsLoaded);
+                        }
+                    }
+                    
+                    const blockLogs = blockResult.success && blockResult.data ? blockResult.data : [];
+                    const observeLogs = observeResult.success && observeResult.data ? observeResult.data : [];
+                    const allIPBlockLogs = [...blockLogs, ...observeLogs].sort((a, b) => b.id - a.id);
+                    
+                    if (allIPBlockLogs.length > 0 && this.ipBlockLogsLoaded.length > 0) {
+                        const latestLoadedId = this.ipBlockLogsLoaded[0].id;
+                        const newIPBlockLogs = allIPBlockLogs.filter(log => log.id > latestLoadedId);
+                        
+                        if (newIPBlockLogs.length > 0) {
+                            console.log('发现新的IP封锁日志:', newIPBlockLogs.length, '条');
+                            hasNewIPBlock = true;
+                            
+                            const latestNewLogId = newIPBlockLogs[0].id;
+                            if (latestNewLogId > this.lastIPBlockLogId) {
+                                this.lastIPBlockLogId = latestNewLogId;
+                            }
+                            
+                            this.ipBlockLogsLoaded = [...newIPBlockLogs, ...this.ipBlockLogsLoaded];
+                            this.updateIPBlockLogs(this.ipBlockLogsLoaded);
+                        }
+                    } else if (allIPBlockLogs.length > 0 && this.ipBlockLogsLoaded.length === 0) {
+                        console.log('首次加载IP封锁日志:', allIPBlockLogs.length, '条');
+                        this.ipBlockLogsLoaded = [...allIPBlockLogs];
+                        this.lastIPBlockLogId = allIPBlockLogs[0].id;
+                        this.updateIPBlockLogs(this.ipBlockLogsLoaded);
+                    }
+                    
+                    if (hasNewAttack) {
+                        this.playAlertSound();
+                    }
+                    if (hasNewIPBlock) {
+                        this.playAlert1Sound();
+                    }
+                } catch (error) {
+                    console.error('加载新日志失败:', error);
+                }
+            }
+        };
+        
+        function toggleSound() {
+            dashboard.soundEnabled = !dashboard.soundEnabled;
+            
+            const btn = document.getElementById('sound-toggle-btn');
+            const icon = document.getElementById('sound-icon');
+            const text = document.getElementById('sound-text');
+            
+            if (dashboard.soundEnabled) {
+                icon.textContent = '🔊';
+                text.textContent = '关闭声音';
+                btn.style.boxShadow = '0 4px 15px rgba(0, 200, 83, 0.4)';
+                btn.style.borderColor = '#00c853';
+                
+                dashboard.alertSound.play().catch(e => console.log('播放初始alert声音失败:', e));
+            } else {
+                icon.textContent = '🔇';
+                text.textContent = '启用声音';
+                btn.style.background = '';
+                btn.style.boxShadow = '';
+                btn.style.borderColor = '';
+            }
+        }
+        
+        document.addEventListener('DOMContentLoaded', () => {
+            dashboard.init();
+        });
+    </script>
+</body>
+</html>
