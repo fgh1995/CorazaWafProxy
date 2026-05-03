@@ -24,10 +24,10 @@
 go build -o coraza-waf-proxy main.go
 ```
 
-### 运行
+### 安装
 
 ```bash
-./coraza-waf-proxy
+./install.sh
 ```
 
 服务启动后访问 `http://localhost:8080/`
