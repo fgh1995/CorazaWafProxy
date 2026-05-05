@@ -3473,6 +3473,474 @@ function formatNumber(num) {
     return num.toString();
 }
 
+let reportTrafficChart = null;
+let reportTrafficPieChart = null;
+let reportAttackTypeChart = null;
+let reportGeoChart = null;
+let reportHourlyChart = null;
+let reportCurrentTimeRange = 'today';
+let reportCustomStartDate = '';
+let reportCustomEndDate = '';
+
+async function loadReportData() {
+    const timeRange = document.getElementById('reportTimeRange').value;
+    reportCurrentTimeRange = timeRange;
+
+    let startDate = '';
+    let endDate = '';
+
+    const now = new Date();
+    if (timeRange === 'today') {
+        startDate = formatDate(now);
+        endDate = formatDate(now);
+    } else if (timeRange === 'week') {
+        const startOfWeek = new Date(now);
+        startOfWeek.setDate(now.getDate() - now.getDay());
+        startDate = formatDate(startOfWeek);
+        endDate = formatDate(now);
+    } else if (timeRange === 'month') {
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        startDate = formatDate(startOfMonth);
+        endDate = formatDate(now);
+    } else if (timeRange === 'year') {
+        const startOfYear = new Date(now.getFullYear(), 0, 1);
+        startDate = formatDate(startOfYear);
+        endDate = formatDate(now);
+    } else if (timeRange === 'custom') {
+        startDate = document.getElementById('reportStartDate').value;
+        endDate = document.getElementById('reportEndDate').value;
+    }
+
+    try {
+        const response = await fetch(`/api/ip-access-logs/report?start=${startDate}&end=${endDate}`);
+        const result = await response.json();
+
+        if (result.success) {
+            updateReportStats(result.data);
+            renderReportTrafficChart(result.data.dailyStats || []);
+            renderReportTrafficPieChart(result.data);
+            renderReportAttackTypeChart(result.data.attackTypeStats || []);
+            renderReportGeoChart(result.data.geoStats || []);
+            renderReportHourlyChart(result.data.hourlyStats || []);
+            renderReportTopAttackIPs(result.data.topAttackIPs || []);
+            renderReportTopAbnormalIPs(result.data.topAbnormalIPs || []);
+        }
+    } catch (error) {
+        console.error('加载报表数据失败:', error);
+    }
+}
+
+function formatDate(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function updateReportStats(data) {
+    document.getElementById('reportTotalRequests').textContent = formatNumber(data.totalRequests || 0);
+    document.getElementById('reportNormalTraffic').textContent = formatNumber(data.normalTraffic || 0);
+    document.getElementById('reportAttackTraffic').textContent = formatNumber(data.attackTraffic || 0);
+    document.getElementById('reportAbnormalIPs').textContent = formatNumber(data.abnormalIPs || 0);
+}
+
+function renderReportTrafficChart(dailyStats) {
+    const chartContainer = document.getElementById('reportTrafficChart');
+    if (!chartContainer) return;
+
+    if (!reportTrafficChart) {
+        reportTrafficChart = echarts.init(chartContainer);
+        window.addEventListener('resize', () => {
+            if (reportTrafficChart) reportTrafficChart.resize();
+        });
+    }
+
+    const times = dailyStats.map(d => d.date || '');
+    const normalValues = dailyStats.map(d => d.normal || 0);
+    const attackValues = dailyStats.map(d => d.attack || 0);
+
+    if (times.length === 0) {
+        times.push('暂无数据');
+        normalValues.push(0);
+        attackValues.push(0);
+    }
+
+    const option = {
+        grid: {
+            left: 50,
+            right: 20,
+            top: 30,
+            bottom: 30,
+            containLabel: true
+        },
+        tooltip: {
+            trigger: 'axis',
+            backgroundColor: 'rgba(255,255,255,0.95)',
+            borderColor: '#e8eaed',
+            borderWidth: 1,
+            textStyle: { color: '#202124', fontSize: 12 }
+        },
+        legend: {
+            data: ['正常流量', '攻击流量'],
+            top: 5,
+            textStyle: { fontSize: 12 }
+        },
+        xAxis: {
+            type: 'category',
+            data: times,
+            boundaryGap: false
+        },
+        yAxis: {
+            type: 'value',
+            name: '请求数',
+            nameTextStyle: { fontSize: 11 }
+        },
+        series: [
+            {
+                name: '正常流量',
+                type: 'line',
+                data: normalValues,
+                smooth: true,
+                showSymbol: false,
+                lineStyle: { width: 2, color: '#34a853' },
+                areaStyle: {
+                    color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                        { offset: 0, color: 'rgba(52,168,83,0.3)' },
+                        { offset: 1, color: 'rgba(52,168,83,0.05)' }
+                    ])
+                }
+            },
+            {
+                name: '攻击流量',
+                type: 'line',
+                data: attackValues,
+                smooth: true,
+                showSymbol: false,
+                lineStyle: { width: 2, color: '#ea4335' },
+                areaStyle: {
+                    color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                        { offset: 0, color: 'rgba(234,67,53,0.3)' },
+                        { offset: 1, color: 'rgba(234,67,53,0.05)' }
+                    ])
+                }
+            }
+        ]
+    };
+
+    reportTrafficChart.setOption(option);
+}
+
+function renderReportTrafficPieChart(data) {
+    const chartContainer = document.getElementById('reportTrafficPieChart');
+    if (!chartContainer) return;
+
+    if (!reportTrafficPieChart) {
+        reportTrafficPieChart = echarts.init(chartContainer);
+        window.addEventListener('resize', () => {
+            if (reportTrafficPieChart) reportTrafficPieChart.resize();
+        });
+    }
+
+    const pieData = [
+        { value: data.normalTraffic || 0, name: '正常流量', itemStyle: { color: '#34a853' } },
+        { value: data.attackTraffic || 0, name: '攻击流量', itemStyle: { color: '#ea4335' } },
+        { value: data.observeTraffic || 0, name: '观察流量', itemStyle: { color: '#fbbc04' } }
+    ];
+
+    if (pieData.every(d => d.value === 0)) {
+        pieData.push({ value: 1, name: '暂无数据', itemStyle: { color: '#e0e0e0' } });
+    }
+
+    const option = {
+        tooltip: {
+            trigger: 'item',
+            formatter: '{b}: {c} ({d}%)'
+        },
+        legend: {
+            orient: 'vertical',
+            right: 10,
+            top: 'center',
+            textStyle: { fontSize: 11 }
+        },
+        series: [{
+            type: 'pie',
+            radius: ['40%', '70%'],
+            center: ['35%', '50%'],
+            avoidLabelOverlap: false,
+            itemStyle: {
+                borderRadius: 4,
+                borderColor: '#fff',
+                borderWidth: 2
+            },
+            label: { show: false },
+            emphasis: {
+                label: { show: false }
+            },
+            data: pieData
+        }]
+    };
+
+    reportTrafficPieChart.setOption(option);
+}
+
+function renderReportAttackTypeChart(attackTypeStats) {
+    const chartContainer = document.getElementById('reportAttackTypeChart');
+    if (!chartContainer) return;
+
+    if (!reportAttackTypeChart) {
+        reportAttackTypeChart = echarts.init(chartContainer);
+        window.addEventListener('resize', () => {
+            if (reportAttackTypeChart) reportAttackTypeChart.resize();
+        });
+    }
+
+    const data = attackTypeStats.slice(0, 6).map(d => ({
+        value: d.count || 0,
+        name: d.type || '未知'
+    }));
+
+    if (data.length === 0) {
+        data.push({ value: 0, name: '暂无数据' });
+    }
+
+    const option = {
+        tooltip: {
+            trigger: 'axis',
+            axisPointer: { type: 'shadow' },
+            formatter: '{b}: {c}'
+        },
+        grid: {
+            left: 100,
+            right: 50,
+            top: 10,
+            bottom: 5,
+            containLabel: true
+        },
+        xAxis: {
+            type: 'value'
+        },
+        yAxis: {
+            type: 'category',
+            data: data.map(d => d.name).reverse(),
+            axisLabel: { fontSize: 10 }
+        },
+        series: [{
+            type: 'bar',
+            data: data.map(d => d.value).reverse(),
+            itemStyle: {
+                color: new echarts.graphic.LinearGradient(0, 0, 1, 0, [
+                    { offset: 0, color: '#f57c00' },
+                    { offset: 1, color: '#ff9800' }
+                ])
+            },
+            barWidth: 12,
+            label: {
+                show: true,
+                position: 'right',
+                fontSize: 10,
+                formatter: '{c}'
+            }
+        }]
+    };
+
+    reportAttackTypeChart.setOption(option);
+}
+
+function renderReportGeoChart(geoStats) {
+    const chartContainer = document.getElementById('reportGeoChart');
+    if (!chartContainer) return;
+
+    if (!reportGeoChart) {
+        reportGeoChart = echarts.init(chartContainer);
+        window.addEventListener('resize', () => {
+            if (reportGeoChart) reportGeoChart.resize();
+        });
+    }
+
+    const data = geoStats.slice(0, 10).map(d => ({
+        value: d.count || 0,
+        name: d.location || '未知'
+    }));
+
+    if (data.length === 0) {
+        data.push({ value: 0, name: '暂无数据' });
+    }
+
+    const option = {
+        tooltip: {
+            trigger: 'item',
+            formatter: '{b}: {c}'
+        },
+        series: [{
+            type: 'bar',
+            data: data,
+            itemStyle: {
+                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                    { offset: 0, color: '#1a73e8' },
+                    { offset: 1, color: '#4285f4' }
+                ])
+            },
+            barWidth: 15,
+            label: {
+                show: true,
+                position: 'right',
+                fontSize: 10,
+                formatter: '{c}'
+            }
+        }],
+        grid: {
+            left: 120,
+            right: 50,
+            top: 5,
+            bottom: 5,
+            containLabel: true
+        },
+        xAxis: {
+            type: 'value',
+            axisLabel: { fontSize: 9 }
+        },
+        yAxis: {
+            type: 'category',
+            data: data.map(d => d.name).reverse(),
+            axisLabel: { fontSize: 10 }
+        }
+    };
+
+    reportGeoChart.setOption(option);
+}
+
+function renderReportHourlyChart(hourlyStats) {
+    const chartContainer = document.getElementById('reportHourlyChart');
+    if (!chartContainer) return;
+
+    if (!reportHourlyChart) {
+        reportHourlyChart = echarts.init(chartContainer);
+        window.addEventListener('resize', () => {
+            if (reportHourlyChart) reportHourlyChart.resize();
+        });
+    }
+
+    const hourlyMap = {};
+    hourlyStats.forEach(d => {
+        hourlyMap[d.hour] = d.count || 0;
+    });
+
+    const hours = Array.from({ length: 24 }, (_, i) => `${i}:00`);
+    const data = hours.map((_, i) => hourlyMap[i] || 0);
+
+    const option = {
+        grid: {
+            left: 20,
+            right: 20,
+            top: 5,
+            bottom: 20,
+            containLabel: true
+        },
+        tooltip: {
+            trigger: 'axis',
+            formatter: '{b}: {c} 次'
+        },
+        xAxis: {
+            type: 'category',
+            data: hours,
+            axisLabel: {
+                fontSize: 9,
+                interval: 5
+            }
+        },
+        yAxis: {
+            type: 'value',
+            show: false
+        },
+        series: [{
+            type: 'bar',
+            data: data,
+            itemStyle: {
+                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                    { offset: 0, color: '#1a73e8' },
+                    { offset: 1, color: '#669df6' }
+                ])
+            },
+            barWidth: '80%',
+            barGap: '10%',
+            categoryGap: '20%'
+        }]
+    };
+
+    reportHourlyChart.setOption(option);
+}
+
+function renderReportTopAttackIPs(topAttackIPs) {
+    const container = document.getElementById('reportTopAttackIPs');
+    if (!container) return;
+
+    if (!topAttackIPs || topAttackIPs.length === 0) {
+        container.innerHTML = '<div style="color: var(--text-muted); text-align: center;">暂无数据</div>';
+        return;
+    }
+
+    const html = topAttackIPs.slice(0, 10).map((item, index) => `
+        <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-light);">
+            <span style="color: ${index < 3 ? '#ea4335' : 'var(--text-primary)'}; font-weight: ${index < 3 ? '600' : '400'};">
+                ${index + 1}. ${item.ip || '未知'}
+            </span>
+            <span style="color: var(--text-secondary);">${item.count || 0} 次</span>
+        </div>
+    `).join('');
+
+    container.innerHTML = html;
+}
+
+function renderReportTopAbnormalIPs(topAbnormalIPs) {
+    const container = document.getElementById('reportTopAbnormalIPs');
+    if (!container) return;
+
+    if (!topAbnormalIPs || topAbnormalIPs.length === 0) {
+        container.innerHTML = '<div style="color: var(--text-muted); text-align: center;">暂无数据</div>';
+        return;
+    }
+
+    const html = topAbnormalIPs.slice(0, 10).map((item, index) => `
+        <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-light);">
+            <span style="color: ${index < 3 ? '#f57c00' : 'var(--text-primary)'}; font-weight: ${index < 3 ? '600' : '400'};">
+                ${index + 1}. ${item.ip || '未知'}
+            </span>
+            <span style="color: var(--text-secondary);">${item.count || 0} 次</span>
+        </div>
+    `).join('');
+
+    container.innerHTML = html;
+}
+
+function changeReportTimeRange() {
+    const timeRange = document.getElementById('reportTimeRange').value;
+    const customDateRange = document.getElementById('customDateRange');
+
+    if (timeRange === 'custom') {
+        customDateRange.style.display = 'flex';
+    } else {
+        customDateRange.style.display = 'none';
+        loadReportData();
+    }
+}
+
+function applyCustomDateRange() {
+    const startDate = document.getElementById('reportStartDate').value;
+    const endDate = document.getElementById('reportEndDate').value;
+
+    if (!startDate || !endDate) {
+        alert('请选择开始和结束日期');
+        return;
+    }
+
+    if (new Date(startDate) > new Date(endDate)) {
+        alert('开始日期不能晚于结束日期');
+        return;
+    }
+
+    loadReportData();
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
     loadCurrentUser();
     loadSystemSettings();

@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$ProjectRoot = "e:\Development\Src\Go\CorazaWafProxy\CorazaWafProxy0.3.3"
+$ProjectRoot = "e:\Development\Src\Go\CorazaWafProxy\CorazaWafProxy"
 $OutputDir = "$ProjectRoot\build"
 Set-Location $ProjectRoot
 

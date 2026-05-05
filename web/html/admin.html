@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WAF 管理后台</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
-    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <script src="../js/lib/echarts.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -131,6 +131,62 @@
 
         .tab-content.active {
             display: block;
+        }
+
+        .stats-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-light);
+            border-radius: var(--border-radius);
+            padding: 16px;
+            box-shadow: var(--shadow-light);
+            text-align: center;
+        }
+
+        .stats-card.blue {
+            background: linear-gradient(135deg, rgba(26, 115, 232, 0.1) 0%, rgba(26, 115, 232, 0.05) 100%);
+            border-color: rgba(26, 115, 232, 0.3);
+        }
+
+        .stats-card.green {
+            background: linear-gradient(135deg, rgba(52, 168, 83, 0.1) 0%, rgba(52, 168, 83, 0.05) 100%);
+            border-color: rgba(52, 168, 83, 0.3);
+        }
+
+        .stats-card.orange {
+            background: linear-gradient(135deg, rgba(255, 152, 0, 0.1) 0%, rgba(255, 152, 0, 0.05) 100%);
+            border-color: rgba(255, 152, 0, 0.3);
+        }
+
+        .stats-card.red {
+            background: linear-gradient(135deg, rgba(234, 67, 53, 0.1) 0%, rgba(234, 67, 53, 0.05) 100%);
+            border-color: rgba(234, 67, 53, 0.3);
+        }
+
+        .stats-label {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .stats-value {
+            font-size: 28px;
+            font-weight: 700;
+        }
+
+        .stats-card.blue .stats-value {
+            color: var(--primary-blue);
+        }
+
+        .stats-card.green .stats-value {
+            color: var(--success-green);
+        }
+
+        .stats-card.orange .stats-value {
+            color: var(--accent-orange);
+        }
+
+        .stats-card.red .stats-value {
+            color: var(--danger-red);
         }
 
         .stats-grid {
@@ -1305,6 +1361,10 @@
                     <span class="nav-icon">📝</span>
                     <span class="nav-text">IP访问日志</span>
                 </a>
+                <a href="#report" class="nav-item" onclick="switchTab('report')">
+                    <span class="nav-icon">📈</span>
+                    <span class="nav-text">统计报表</span>
+                </a>
                 <a href="#settings" class="nav-item" onclick="switchTab('settings')">
                     <span class="nav-icon">⚙️</span>
                     <span class="nav-text">系统设置</span>
@@ -1726,6 +1786,94 @@
                 </div>
             </div>
 
+            <div id="report-tab" class="tab-content">
+                <div class="card">
+                    <div class="card-title-inline">
+                        <div style="display: flex; align-items: center; gap: 12px;">
+                            <div class="mui-select-wrapper">
+                                <select id="reportTimeRange" onchange="changeReportTimeRange()" class="mui-select">
+                                    <option value="today">今日</option>
+                                    <option value="week">本周</option>
+                                    <option value="month">本月</option>
+                                    <option value="year">本年</option>
+                                    <option value="custom">自定义</option>
+                                </select>
+                                <div class="mui-select-icon">▼</div>
+                                <div class="mui-select-outline">
+                                    <div class="mui-select-legend">时间范围</div>
+                                </div>
+                            </div>
+                            <div id="customDateRange" style="display: none; align-items: center; gap: 8px;">
+                                <input type="date" id="reportStartDate" class="mui-input" style="width: 140px;">
+                                <span style="color: var(--text-secondary);">至</span>
+                                <input type="date" id="reportEndDate" class="mui-input" style="width: 140px;">
+                                <button class="btn btn-primary" onclick="applyCustomDateRange()">应用</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="stats-grid" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 16px;">
+                        <div class="stats-card blue">
+                            <div class="stats-label">总请求数</div>
+                            <div class="stats-value" id="reportTotalRequests">0</div>
+                        </div>
+                        <div class="stats-card green">
+                            <div class="stats-label">正常流量</div>
+                            <div class="stats-value" id="reportNormalTraffic">0</div>
+                        </div>
+                        <div class="stats-card orange">
+                            <div class="stats-label">攻击流量</div>
+                            <div class="stats-value" id="reportAttackTraffic">0</div>
+                        </div>
+                        <div class="stats-card red">
+                            <div class="stats-label">异常IP数</div>
+                            <div class="stats-value" id="reportAbnormalIPs">0</div>
+                        </div>
+                    </div>
+                    <div class="stats-main-layout">
+                        <div class="stats-left">
+                            <div class="stats-left-grid">
+                                <div class="stats-left-card">
+                                    <h4 style="margin-bottom: 12px; color: var(--text-primary);">📊 流量趋势</h4>
+                                    <div id="reportTrafficChart" style="width: 100%; height: 280px;"></div>
+                                </div>
+                            </div>
+                            <div class="stats-left-grid" style="grid-template-columns: 1fr 1fr;">
+                                <div class="stats-left-card">
+                                    <h4 style="margin-bottom: 12px; color: var(--text-primary);">🥧 流量分布</h4>
+                                    <div id="reportTrafficPieChart" style="width: 100%; height: 220px;"></div>
+                                </div>
+                                <div class="stats-left-card">
+                                    <h4 style="margin-bottom: 12px; color: var(--text-primary);">🎯 攻击类型分布</h4>
+                                    <div id="reportAttackTypeChart" style="width: 100%; height: 220px;"></div>
+                                </div>
+                            </div>
+                            <div class="stats-left-grid">
+                                <div class="stats-left-card">
+                                    <h4 style="margin-bottom: 12px; color: var(--text-primary);">🌍 地理分布 TOP10</h4>
+                                    <div id="reportGeoChart" style="width: 100%; height: 200px;"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="stats-right">
+                            <div class="stats-right-card" style="min-height: 180px;">
+                                <h4 style="margin-bottom: 12px; color: var(--text-primary);">🔝 TOP 10 攻击IP</h4>
+                                <div id="reportTopAttackIPs" style="font-size: 13px;"></div>
+                            </div>
+                            <div class="stats-right-card" style="min-height: 180px;">
+                                <h4 style="margin-bottom: 12px; color: var(--text-primary);">⚠️ TOP 10 异常IP</h4>
+                                <div id="reportTopAbnormalIPs" style="font-size: 13px;"></div>
+                            </div>
+                            <div class="stats-right-card" style="min-height: 200px; padding: 8px;">
+                                <h4 style="margin-bottom: 8px; color: var(--text-primary); width: 100%; text-align: center;">📋 时段分布</h4>
+                                <div style="display: flex; justify-content: center;">
+                                    <div id="reportHourlyChart" style="width: 298px; height: 150px;"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div id="logs-tab" class="tab-content">
                 <div class="card">
                     <div class="card-title-inline">
@@ -2118,6 +2266,8 @@
                 loadLogs();
             } else if (tabName === 'stats') {
                 loadStats();
+            } else if (tabName === 'report') {
+                loadReportData();
             } else if (tabName === 'settings') {
                 loadCurrentUser();
             }

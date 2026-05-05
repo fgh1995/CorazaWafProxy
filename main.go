@@ -4128,6 +4128,206 @@ func handleIPAccessLogs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func handleIPAccessLogsReport(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	startDate := r.URL.Query().Get("start")
+	endDate := r.URL.Query().Get("end")
+
+	if startDate == "" || endDate == "" {
+		now := time.Now()
+		startDate = now.Format("2006-01-02")
+		endDate = now.Format("2006-01-02")
+	}
+
+	type DailyStat struct {
+		Date   string `json:"date"`
+		Normal int    `json:"normal"`
+		Attack int    `json:"attack"`
+	}
+
+	type AttackTypeStat struct {
+		Type  string `json:"type"`
+		Count int    `json:"count"`
+	}
+
+	type GeoStat struct {
+		Location string `json:"location"`
+		Count    int    `json:"count"`
+	}
+
+	type HourlyStat struct {
+		Hour  int `json:"hour"`
+		Count int `json:"count"`
+	}
+
+	type TopIP struct {
+		IP    string `json:"ip"`
+		Count int    `json:"count"`
+	}
+
+	var totalRequests, normalTraffic, attackTraffic, observeTraffic, abnormalIPs int
+
+	err := db.QueryRow(`
+		SELECT 
+			COALESCE(SUM(CASE WHEN result = 'pass' THEN 1 ELSE 0 END), 0) as normal_traffic,
+			COALESCE(SUM(CASE WHEN result = 'block' THEN 1 ELSE 0 END), 0) as attack_traffic,
+			COALESCE(SUM(CASE WHEN result = 'observe' THEN 1 ELSE 0 END), 0) as observe_traffic,
+			COALESCE(COUNT(DISTINCT CASE WHEN result != 'pass' THEN ip END), 0) as abnormal_ips
+		FROM ip_access_logs 
+		WHERE DATE(created_at) >= ? AND DATE(created_at) <= ?
+	`, startDate, endDate).Scan(&normalTraffic, &attackTraffic, &observeTraffic, &abnormalIPs)
+
+	if err != nil {
+		log.Printf("查询报表统计数据失败: %v", err)
+	}
+
+	totalRequests = normalTraffic + attackTraffic + observeTraffic
+
+	dailyRows, err := db.Query(`
+		SELECT 
+			DATE(created_at) as date,
+			COALESCE(SUM(CASE WHEN result = 'pass' THEN 1 ELSE 0 END), 0) as normal,
+			COALESCE(SUM(CASE WHEN result = 'block' THEN 1 ELSE 0 END), 0) as attack
+		FROM ip_access_logs 
+		WHERE DATE(created_at) >= ? AND DATE(created_at) <= ?
+		GROUP BY DATE(created_at)
+		ORDER BY date
+	`, startDate, endDate)
+	
+	dailyStats := make([]DailyStat, 0)
+	if dailyRows != nil {
+		for dailyRows.Next() {
+			var stat DailyStat
+			dailyRows.Scan(&stat.Date, &stat.Normal, &stat.Attack)
+			dailyStats = append(dailyStats, stat)
+		}
+		dailyRows.Close()
+	}
+
+	attackTypeRows, err := db.Query(`
+		SELECT 
+			COALESCE(action, 'unknown') as type,
+			COUNT(*) as count
+		FROM ip_access_logs 
+		WHERE DATE(created_at) >= ? AND DATE(created_at) <= ? AND result = 'block'
+		GROUP BY action
+		ORDER BY count DESC
+		LIMIT 10
+	`, startDate, endDate)
+
+	attackTypeStats := make([]AttackTypeStat, 0)
+	if attackTypeRows != nil {
+		for attackTypeRows.Next() {
+			var stat AttackTypeStat
+			attackTypeRows.Scan(&stat.Type, &stat.Count)
+			attackTypeStats = append(attackTypeStats, stat)
+		}
+		attackTypeRows.Close()
+	}
+
+	geoRows, err := db.Query(`
+		SELECT 
+			COALESCE(country, '未知') || ' ' || COALESCE(province, '') || ' ' || COALESCE(city, '') as location,
+			COUNT(*) as count
+		FROM ip_access_logs 
+		WHERE DATE(created_at) >= ? AND DATE(created_at) <= ?
+		GROUP BY country, province, city
+		ORDER BY count DESC
+		LIMIT 10
+	`, startDate, endDate)
+
+	geoStats := make([]GeoStat, 0)
+	if geoRows != nil {
+		for geoRows.Next() {
+			var stat GeoStat
+			geoRows.Scan(&stat.Location, &stat.Count)
+			stat.Location = strings.TrimSpace(stat.Location)
+			geoStats = append(geoStats, stat)
+		}
+		geoRows.Close()
+	}
+
+	hourlyRows, err := db.Query(`
+		SELECT 
+			CAST(strftime('%H', created_at) AS INTEGER) as hour,
+			COUNT(*) as count
+		FROM ip_access_logs 
+		WHERE DATE(created_at) >= ? AND DATE(created_at) <= ?
+		GROUP BY hour
+		ORDER BY hour
+	`, startDate, endDate)
+
+	hourlyStats := make([]HourlyStat, 0)
+	hourlyMap := make(map[int]int)
+	if hourlyRows != nil {
+		for hourlyRows.Next() {
+			var stat HourlyStat
+			hourlyRows.Scan(&stat.Hour, &stat.Count)
+			hourlyMap[stat.Hour] = stat.Count
+		}
+		hourlyRows.Close()
+	}
+	for i := 0; i < 24; i++ {
+		hourlyStats = append(hourlyStats, HourlyStat{Hour: i, Count: hourlyMap[i]})
+	}
+
+	topAttackIPRows, err := db.Query(`
+		SELECT ip, COUNT(*) as count
+		FROM ip_access_logs 
+		WHERE DATE(created_at) >= ? AND DATE(created_at) <= ? AND result = 'block'
+		GROUP BY ip
+		ORDER BY count DESC
+		LIMIT 10
+	`, startDate, endDate)
+
+	topAttackIPs := make([]TopIP, 0)
+	if topAttackIPRows != nil {
+		for topAttackIPRows.Next() {
+			var ip TopIP
+			topAttackIPRows.Scan(&ip.IP, &ip.Count)
+			topAttackIPs = append(topAttackIPs, ip)
+		}
+		topAttackIPRows.Close()
+	}
+
+	topAbnormalIPRows, err := db.Query(`
+		SELECT ip, COUNT(*) as count
+		FROM ip_access_logs 
+		WHERE DATE(created_at) >= ? AND DATE(created_at) <= ? AND result != 'pass'
+		GROUP BY ip
+		ORDER BY count DESC
+		LIMIT 10
+	`, startDate, endDate)
+
+	topAbnormalIPs := make([]TopIP, 0)
+	if topAbnormalIPRows != nil {
+		for topAbnormalIPRows.Next() {
+			var ip TopIP
+			topAbnormalIPRows.Scan(&ip.IP, &ip.Count)
+			topAbnormalIPs = append(topAbnormalIPs, ip)
+		}
+		topAbnormalIPRows.Close()
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"data": map[string]interface{}{
+			"totalRequests":   totalRequests,
+			"normalTraffic":  normalTraffic,
+			"attackTraffic":  attackTraffic,
+			"observeTraffic": observeTraffic,
+			"abnormalIPs":    abnormalIPs,
+			"dailyStats":     dailyStats,
+			"attackTypeStats": attackTypeStats,
+			"geoStats":       geoStats,
+			"hourlyStats":    hourlyStats,
+			"topAttackIPs":   topAttackIPs,
+			"topAbnormalIPs": topAbnormalIPs,
+		},
+	})
+}
+
 func handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
@@ -5196,6 +5396,7 @@ func main() {
 		}
 	})
 	mux.HandleFunc("/api/ip-access-logs", handleIPAccessLogs)
+	mux.HandleFunc("/api/ip-access-logs/report", handleIPAccessLogsReport)
 	mux.HandleFunc("/api/rir-import", readOnlyMiddleware(handleRIRImport))
 	mux.HandleFunc("/api/rir-import-progress", handleRIRImportProgress)
 	mux.HandleFunc("/api/system-settings", func(w http.ResponseWriter, r *http.Request) {
@@ -5213,6 +5414,9 @@ func main() {
 	}))
 	mux.HandleFunc("/web/js/admin.js", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "web/js/admin.js")
+	}))
+	mux.HandleFunc("/web/js/lib/echarts.min.js", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "web/js/lib/echarts.min.js")
 	}))
 	mux.HandleFunc("/web/html/dashboard.html", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "web/html/dashboard.html")
