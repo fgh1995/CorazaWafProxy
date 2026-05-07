@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=1280, initial-scale=1.0, user-scalable=no">
     <title>CorazaWAF 安全防护监控大屏</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
@@ -21,6 +21,7 @@
         
         .dashboard-container {
             width: 100vw;
+            min-width: 1280px;
             height: 100vh;
             display: flex;
             flex-direction: column;
@@ -35,7 +36,7 @@
         
         .dashboard-header {
             width: 100%;
-            padding: 15px 30px;
+            padding: 10px 30px;
             background: linear-gradient(90deg, rgba(0, 229, 255, 0.1) 0%, transparent 100%);
             border-bottom: 2px solid rgba(0, 229, 255, 0.3);
             display: flex;
@@ -46,7 +47,7 @@
         
         .dashboard-header h1 {
             color: #00e5ff;
-            font-size: 28px;
+            font-size: 24px;
             font-weight: bold;
             text-shadow: 0 0 20px rgba(0, 229, 255, 0.5);
             letter-spacing: 2px;
@@ -62,8 +63,8 @@
             flex: 1;
             display: grid;
             grid-template-columns: 280px 1fr 380px;
-            gap: 15px;
-            padding: 15px;
+            gap: 12px;
+            padding: 12px;
             min-height: 0;
             overflow-y: auto;
         }
@@ -71,15 +72,15 @@
         .realtime-cards {
             display: flex;
             flex-direction: column;
-            gap: 8px;
-            margin-bottom: 12px;
+            gap: 6px;
+            margin-bottom: 8px;
         }
 
         .realtime-card {
             background: linear-gradient(135deg, rgba(0, 229, 255, 0.1) 0%, rgba(0, 229, 255, 0.05) 100%);
             border: 1px solid rgba(0, 229, 255, 0.3);
             border-radius: 6px;
-            padding: 10px;
+            padding: 8px;
             box-shadow: 0 4px 15px rgba(0, 229, 255, 0.2);
         }
 
@@ -87,15 +88,15 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 8px;
+            margin-bottom: 5px;
         }
 
         .realtime-card.traffic {
-            margin-bottom: 8px;
+            margin-bottom: 6px;
         }
 
         .realtime-card.attack {
-            margin-top: 8px;
+            margin-top: 6px;
         }
 
         .realtime-card.attack {
@@ -295,33 +296,33 @@
         .dashboard-sidebar {
             display: flex;
             flex-direction: column;
-            gap: 12px;
+            gap: 10px;
         }
         
         .stat-card {
             background: linear-gradient(135deg, rgba(0, 229, 255, 0.1) 0%, rgba(0, 229, 255, 0.05) 100%);
             border: 1px solid rgba(0, 229, 255, 0.3);
-            border-radius: 12px;
-            padding: 15px;
+            border-radius: 8px;
+            padding: 10px;
             text-align: center;
             box-shadow: 0 4px 20px rgba(0, 229, 255, 0.2);
         }
         
         .stat-icon {
-            font-size: 40px;
-            margin-bottom: 8px;
+            font-size: 32px;
+            margin-bottom: 5px;
         }
         
         .stat-value {
-            font-size: 30px;
+            font-size: 24px;
             font-weight: bold;
             color: #00e5ff;
-            margin-bottom: 5px;
+            margin-bottom: 3px;
             text-shadow: 0 0 10px rgba(0, 229, 255, 0.5);
         }
         
         .stat-label {
-            font-size: 12px;
+            font-size: 11px;
             color: #8b9bb4;
             text-transform: uppercase;
             letter-spacing: 1px;
@@ -350,7 +351,7 @@
         .dashboard-right {
             display: flex;
             flex-direction: column;
-            gap: 15px;
+            gap: 12px;
             min-height: 0;
         }
         
@@ -358,8 +359,8 @@
             flex: 1;
             background: linear-gradient(135deg, rgba(255, 68, 68, 0.1) 0%, rgba(255, 68, 68, 0.05) 100%);
             border: 1px solid rgba(255, 68, 68, 0.3);
-            border-radius: 12px;
-            padding: 15px;
+            border-radius: 8px;
+            padding: 10px;
             overflow: hidden;
             box-shadow: 0 4px 20px rgba(255, 68, 68, 0.2);
             min-height: 0;
@@ -552,8 +553,8 @@
         .dashboard-btn {
             background: linear-gradient(135deg, #00e5ff 0%, #00b8e6 100%);
             border: none;
-            border-radius: 8px;
-            padding: 8px 16px;
+            border-radius: 6px;
+            padding: 6px 12px;
             color: #000;
             font-size: 12px;
             font-weight: 600;
@@ -565,7 +566,7 @@
             transition: all 0.3s ease;
             width: 100%;
             justify-content: center;
-            margin-bottom: 12px;
+            margin-bottom: 8px;
         }
         
         .dashboard-btn:hover {
