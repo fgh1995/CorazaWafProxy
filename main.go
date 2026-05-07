@@ -4274,8 +4274,8 @@ func handleIPAccessLogsReport(w http.ResponseWriter, r *http.Request) {
 
 	topAttackIPRows, err := db.Query(`
 		SELECT ip, COUNT(*) as count
-		FROM ip_access_logs 
-		WHERE DATE(created_at) >= ? AND DATE(created_at) <= ? AND result = 'block'
+		FROM ip_access_logs
+		WHERE DATE(created_at) >= ? AND DATE(created_at) <= ? AND result IN ('block', 'observe')
 		GROUP BY ip
 		ORDER BY count DESC
 		LIMIT 10
@@ -4324,6 +4324,87 @@ func handleIPAccessLogsReport(w http.ResponseWriter, r *http.Request) {
 			"hourlyStats":    hourlyStats,
 			"topAttackIPs":   topAttackIPs,
 			"topAbnormalIPs": topAbnormalIPs,
+		},
+	})
+}
+
+func handleTrendData(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	date := r.URL.Query().Get("date")
+	if date == "" {
+		date = time.Now().Format("2006-01-02")
+	}
+
+	compareType := r.URL.Query().Get("compare")
+	if compareType == "" {
+		compareType = "prev-day"
+	}
+
+	var compareDate string
+	if compareType == "prev-day" {
+		d, _ := time.Parse("2006-01-02", date)
+		compareDate = d.AddDate(0, 0, -1).Format("2006-01-02")
+	} else {
+		d, _ := time.Parse("2006-01-02", date)
+		compareDate = d.AddDate(0, 0, -7).Format("2006-01-02")
+	}
+
+	type HourlyTrend struct {
+		Hour           int `json:"hour"`
+		AbnormalIPCount int `json:"abnormal_ip_count"`
+		BlockCount     int `json:"block_count"`
+		ObserveCount   int `json:"observe_count"`
+	}
+
+	getHourlyTrend := func(queryDate string) []HourlyTrend {
+		rows, err := db.Query(`
+			SELECT 
+				CAST(strftime('%H', created_at) AS INTEGER) as hour,
+				COALESCE(COUNT(DISTINCT CASE WHEN result != 'pass' THEN ip END), 0) as abnormal_ip_count,
+				COALESCE(SUM(CASE WHEN result = 'block' THEN 1 ELSE 0 END), 0) as block_count,
+				COALESCE(SUM(CASE WHEN result = 'observe' THEN 1 ELSE 0 END), 0) as observe_count
+			FROM ip_access_logs 
+			WHERE DATE(created_at) = ?
+			GROUP BY hour
+			ORDER BY hour
+		`, queryDate)
+
+		if err != nil {
+			log.Printf("查询趋势数据失败: %v", err)
+			return make([]HourlyTrend, 0)
+		}
+		defer rows.Close()
+
+		hourlyMap := make(map[int]HourlyTrend)
+		for rows.Next() {
+			var trend HourlyTrend
+			rows.Scan(&trend.Hour, &trend.AbnormalIPCount, &trend.BlockCount, &trend.ObserveCount)
+			hourlyMap[trend.Hour] = trend
+		}
+
+		result := make([]HourlyTrend, 24)
+		for i := 0; i < 24; i++ {
+			if t, ok := hourlyMap[i]; ok {
+				result[i] = t
+			} else {
+				result[i] = HourlyTrend{Hour: i, AbnormalIPCount: 0, BlockCount: 0, ObserveCount: 0}
+			}
+		}
+		return result
+	}
+
+	todayTrend := getHourlyTrend(date)
+	compareTrend := getHourlyTrend(compareDate)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"data": map[string]interface{}{
+			"date":         date,
+			"compareDate":  compareDate,
+			"compareType":  compareType,
+			"todayTrend":   todayTrend,
+			"compareTrend": compareTrend,
 		},
 	})
 }
@@ -5397,6 +5478,7 @@ func main() {
 	})
 	mux.HandleFunc("/api/ip-access-logs", handleIPAccessLogs)
 	mux.HandleFunc("/api/ip-access-logs/report", handleIPAccessLogsReport)
+	mux.HandleFunc("/api/trend-data", handleTrendData)
 	mux.HandleFunc("/api/rir-import", readOnlyMiddleware(handleRIRImport))
 	mux.HandleFunc("/api/rir-import-progress", handleRIRImportProgress)
 	mux.HandleFunc("/api/system-settings", func(w http.ResponseWriter, r *http.Request) {
