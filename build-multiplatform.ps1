@@ -5,10 +5,10 @@ $OutputDir = "$ProjectRoot\build"
 Set-Location $ProjectRoot
 
 $Platforms = @(
-    @{GOOS="windows"; GOARCH="amd64"; Folder="windows-amd64"; Ext=".exe"},
-    @{GOOS="windows"; GOARCH="arm64"; Folder="windows-arm64"; Ext=".exe"},
+    @{GOOS="linux"; GOARCH="arm64"; Folder="linux-arm64"; Ext=""},
     @{GOOS="linux"; GOARCH="amd64"; Folder="linux-amd64"; Ext=""},
-    @{GOOS="linux"; GOARCH="arm64"; Folder="linux-arm64"; Ext=""}
+    @{GOOS="windows"; GOARCH="amd64"; Folder="windows-amd64"; Ext=".exe"},
+    @{GOOS="windows"; GOARCH="arm64"; Folder="windows-arm64"; Ext=".exe"}
 )
 
 if (Test-Path $OutputDir) {

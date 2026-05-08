@@ -32,6 +32,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+const frontendVersion = "v0.4.0-v1.1"
+const localVersionInt = 4001 // 版本整数值，用于对比
+
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
 var proxyInstances = make(map[string]*ProxyInstance)
@@ -129,6 +132,318 @@ func translateAndDeduplicateRules(rulesStr string) string {
 
 func getUTCTime() string {
 	return time.Now().UTC().Format(time.RFC3339)
+}
+
+func getUTCTimestamp() int64 {
+	return time.Now().UTC().Unix()
+}
+
+const currentDBVersion = "1.1"
+
+func getCurrentDBVersion() string {
+	var version string
+	err := db.QueryRow("SELECT version FROM db_version ORDER BY id DESC LIMIT 1").Scan(&version)
+	if err != nil {
+		return "1.0"
+	}
+	return version
+}
+
+func setDBVersion(version string) error {
+	_, err := db.Exec("INSERT INTO db_version (version, updated_at) VALUES (?, ?)", version, getUTCTimestamp())
+	return err
+}
+
+var upgradeProgress struct {
+	mutex     sync.Mutex
+	stage     string
+	current   int
+	total     int
+	stepName  string
+	completed bool
+	error     string
+}
+
+func initUpgradeProgress() {
+	upgradeProgress = struct {
+		mutex     sync.Mutex
+		stage     string
+		current   int
+		total     int
+		stepName  string
+		completed bool
+		error     string
+	}{}
+}
+
+func updateUpgradeProgress(stage string, current, total int, stepName string) {
+	upgradeProgress.mutex.Lock()
+	defer upgradeProgress.mutex.Unlock()
+	upgradeProgress.stage = stage
+	upgradeProgress.current = current
+	upgradeProgress.total = total
+	upgradeProgress.stepName = stepName
+}
+
+func setUpgradeCompleted() {
+	upgradeProgress.mutex.Lock()
+	defer upgradeProgress.mutex.Unlock()
+	upgradeProgress.completed = true
+}
+
+func setUpgradeError(err string) {
+	upgradeProgress.mutex.Lock()
+	defer upgradeProgress.mutex.Unlock()
+	upgradeProgress.error = err
+}
+
+func getUpgradeProgress() (stage string, current, total int, stepName string, completed bool, err string) {
+	upgradeProgress.mutex.Lock()
+	defer upgradeProgress.mutex.Unlock()
+	return upgradeProgress.stage, upgradeProgress.current, upgradeProgress.total, upgradeProgress.stepName, upgradeProgress.completed, upgradeProgress.error
+}
+
+func backupDatabase() (string, error) {
+	dbPath := "./data/waf.db"
+	backupDir := "./data/backup"
+	
+	err := os.MkdirAll(backupDir, 0755)
+	if err != nil {
+		return "", fmt.Errorf("创建备份目录失败: %v", err)
+	}
+	
+	_, err = db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	if err != nil {
+		log.Printf("WAL检查点操作失败: %v", err)
+	} else {
+		log.Println("WAL文件已合并到主数据库")
+	}
+	
+	timestamp := time.Now().Format("20060102_150405")
+	backupPath := fmt.Sprintf("%s/waf_backup_%s.db", backupDir, timestamp)
+	
+	sourceFile, err := os.Open(dbPath)
+	if err != nil {
+		return "", fmt.Errorf("打开源数据库文件失败: %v", err)
+	}
+	defer sourceFile.Close()
+	
+	destFile, err := os.Create(backupPath)
+	if err != nil {
+		return "", fmt.Errorf("创建备份文件失败: %v", err)
+	}
+	defer destFile.Close()
+	
+	_, err = io.Copy(destFile, sourceFile)
+	if err != nil {
+		return "", fmt.Errorf("复制数据库文件失败: %v", err)
+	}
+	
+	return backupPath, nil
+}
+
+func upgradeDBFrom10To11() error {
+	initUpgradeProgress()
+	log.Println("开始升级数据库从版本1.0到1.1...")
+	
+	go func() {
+		err := performUpgradeSteps()
+		if err != nil {
+			setUpgradeError(err.Error())
+			log.Printf("数据库升级失败: %v", err)
+		} else {
+			setUpgradeCompleted()
+			log.Println("数据库升级完成，当前版本: 1.1")
+		}
+	}()
+	
+	return nil
+}
+
+func performUpgradeSteps() error {
+	updateUpgradeProgress("backingup", 0, 100, "正在备份数据库...")
+	log.Println("开始备份数据库...")
+	
+	backupPath, err := backupDatabase()
+	if err != nil {
+		log.Printf("数据库备份失败: %v", err)
+		return fmt.Errorf("数据库备份失败: %v", err)
+	}
+	log.Printf("数据库备份成功，备份文件: %s", backupPath)
+	
+	tables := []struct {
+		name        string
+		idCol       string
+		timeCol     string
+		displayName string
+		idType      string
+	}{
+		{"waf_instances", "id", "created_at", "WAF实例", "text"},
+		{"proxy_instances", "id", "created_at", "代理实例", "text"},
+		{"port_forward_instances", "id", "created_at", "端口转发", "text"},
+		{"attack_logs", "id", "time", "攻击日志", "text"},
+		{"statistics", "id", "updated_at", "统计数据", "int"},
+		{"ip_whitelist", "id", "created_at", "IP白名单", "int"},
+		{"ip_blacklist", "id", "created_at", "IP黑名单", "int"},
+		{"ip_settings", "id", "updated_at", "IP设置", "int"},
+		{"system_settings", "key", "updated_at", "系统设置", "text"},
+		{"ip_access_logs", "id", "created_at", "IP访问日志", "int"},
+		{"webhook_settings", "id", "updated_at", "Webhook设置", "int"},
+	}
+	
+	log.Println("统计所有表的记录数...")
+	var totalRecords int64
+	tableRecords := make([]int, len(tables))
+	for idx, table := range tables {
+		var count int
+		query := fmt.Sprintf("SELECT COUNT(*) FROM %s", table.name)
+		db.QueryRow(query).Scan(&count)
+		tableRecords[idx] = count
+		totalRecords += int64(count)
+		log.Printf("%s表: %d条记录", table.displayName, count)
+	}
+	
+	log.Printf("总记录数: %d", totalRecords)
+	
+	updateUpgradeProgress("upgrading", 0, int(totalRecords), "开始升级...")
+	
+	var processedRecords int64 = 0
+	batchSize := 1000
+	
+	for idx, table := range tables {
+		count := tableRecords[idx]
+		if count == 0 {
+			log.Printf("%s表为空，跳过", table.displayName)
+			continue
+		}
+		
+		log.Printf("转换%s表的时间字段... (%d条)", table.displayName, count)
+		
+		processed := 0
+		for processed < count {
+			batchEnd := processed + batchSize
+			if batchEnd > count {
+				batchEnd = count
+			}
+			
+			var rows *sql.Rows
+			var err error
+			
+			if table.idType == "int" {
+				query := fmt.Sprintf("SELECT id, %s FROM %s LIMIT ? OFFSET ?", table.timeCol, table.name)
+				rows, err = db.Query(query, batchSize, processed)
+			} else {
+				query := fmt.Sprintf("SELECT %s, %s FROM %s LIMIT ? OFFSET ?", table.idCol, table.timeCol, table.name)
+				rows, err = db.Query(query, batchSize, processed)
+			}
+			
+			if err != nil {
+				return fmt.Errorf("查询%s失败: %w", table.displayName, err)
+			}
+			
+			updates := make([]struct {
+				id        interface{}
+				timestamp int64
+			}, 0)
+			
+			for rows.Next() {
+				var id interface{}
+				var timeStr string
+				
+				if table.idType == "int" {
+					var intId int
+					if err := rows.Scan(&intId, &timeStr); err != nil {
+						rows.Close()
+						return fmt.Errorf("读取%s记录失败: %w", table.displayName, err)
+					}
+					id = intId
+				} else {
+					var textId string
+					if err := rows.Scan(&textId, &timeStr); err != nil {
+						rows.Close()
+						return fmt.Errorf("读取%s记录失败: %w", table.displayName, err)
+					}
+					id = textId
+				}
+				
+				timestamp := convertTimeStringToTimestamp(timeStr)
+				updates = append(updates, struct {
+					id        interface{}
+					timestamp int64
+				}{id, timestamp})
+			}
+			rows.Close()
+			
+			tx, err := db.Begin()
+			if err != nil {
+				return fmt.Errorf("开始事务失败: %w", err)
+			}
+			
+			stmt, err := tx.Prepare(fmt.Sprintf("UPDATE %s SET %s = ? WHERE %s = ?", table.name, table.timeCol, table.idCol))
+			if err != nil {
+				tx.Rollback()
+				return fmt.Errorf("预处理语句失败: %w", err)
+			}
+			
+			for _, u := range updates {
+				_, err = stmt.Exec(u.timestamp, u.id)
+				if err != nil {
+					stmt.Close()
+					tx.Rollback()
+					return fmt.Errorf("更新%s记录失败: %w", table.displayName, err)
+				}
+			}
+			
+			stmt.Close()
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("提交事务失败: %w", err)
+			}
+			
+			processedRecords += int64(batchEnd - processed)
+			if processedRecords > totalRecords {
+				processedRecords = totalRecords
+			}
+			processed = batchEnd
+			updateUpgradeProgress("upgrading", int(processedRecords), int(totalRecords), fmt.Sprintf("升级中: %s (%d/%d)", table.displayName, processed, count))
+		}
+	}
+	
+	updateUpgradeProgress("finalizing", int(totalRecords), int(totalRecords), "清理WAL文件...")
+
+	_, err = db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	if err != nil {
+		log.Printf("清理WAL文件失败: %v", err)
+	}
+	
+	updateUpgradeProgress("completed", int(totalRecords), int(totalRecords), "升级完成")
+	
+	err = setDBVersion(currentDBVersion)
+	if err != nil {
+		return fmt.Errorf("更新数据库版本失败: %w", err)
+	}
+	
+	return nil
+}
+
+func convertTimeStringToTimestamp(timeStr string) int64 {
+	// 尝试解析多种时间格式
+	formats := []string{
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05",
+	}
+	
+	for _, format := range formats {
+		t, err := time.Parse(format, timeStr)
+		if err == nil {
+			return t.Unix()
+		}
+	}
+	
+	// 如果都解析失败，返回当前时间戳
+	log.Printf("无法解析时间字符串: %s，使用当前时间", timeStr)
+	return getUTCTimestamp()
 }
 
 type User struct {
@@ -361,7 +676,7 @@ func initDB() error {
 		name TEXT NOT NULL,
 		mode TEXT NOT NULL,
 		rules TEXT NOT NULL,
-		created_at TEXT NOT NULL
+		created_at INTEGER NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS proxy_instances (
@@ -370,7 +685,7 @@ func initDB() error {
 		listen_port INTEGER NOT NULL,
 		backend TEXT NOT NULL,
 		waf_id TEXT,
-		created_at TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
 		FOREIGN KEY (waf_id) REFERENCES waf_instances(id)
 	);
 
@@ -384,7 +699,7 @@ func initDB() error {
 		ip_mode TEXT NOT NULL,
 		action_mode TEXT NOT NULL,
 		status TEXT NOT NULL,
-		created_at TEXT NOT NULL
+		created_at INTEGER NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS attack_logs (
@@ -393,7 +708,7 @@ func initDB() error {
 		url TEXT NOT NULL,
 		attack_type TEXT,
 		ip TEXT NOT NULL,
-		time TEXT NOT NULL,
+		time INTEGER NOT NULL,
 		rules TEXT,
 		method TEXT NOT NULL,
 		proxy_id TEXT,
@@ -402,7 +717,8 @@ func initDB() error {
 		province TEXT,
 		city TEXT,
 		latitude REAL,
-		longitude REAL
+		longitude REAL,
+		filter_type TEXT
 	);
 
 	CREATE TABLE IF NOT EXISTS statistics (
@@ -420,7 +736,7 @@ func initDB() error {
 		five_xx_error INTEGER DEFAULT 0,
 		five_xx_error_rate REAL DEFAULT 0,
 		four_xx_block_rate REAL DEFAULT 0,
-		updated_at TEXT NOT NULL
+		updated_at INTEGER NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS ip_whitelist (
@@ -428,7 +744,7 @@ func initDB() error {
 		ip TEXT NOT NULL,
 		description TEXT,
 		source TEXT DEFAULT 'custom',
-		created_at TEXT NOT NULL
+		created_at INTEGER NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS ip_blacklist (
@@ -436,20 +752,20 @@ func initDB() error {
 		ip TEXT NOT NULL,
 		description TEXT,
 		source TEXT DEFAULT 'custom',
-		created_at TEXT NOT NULL
+		created_at INTEGER NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS ip_settings (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		mode TEXT NOT NULL DEFAULT 'normal',
 		action_mode TEXT NOT NULL DEFAULT 'block',
-		updated_at TEXT NOT NULL
+		updated_at INTEGER NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS system_settings (
 		key TEXT PRIMARY KEY,
 		value TEXT NOT NULL,
-		updated_at TEXT NOT NULL
+		updated_at INTEGER NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS ip_access_logs (
@@ -459,7 +775,15 @@ func initDB() error {
 		action TEXT NOT NULL,
 		result TEXT NOT NULL,
 		url TEXT,
-		created_at TEXT NOT NULL
+		country TEXT,
+		province TEXT,
+		city TEXT,
+		latitude REAL,
+		longitude REAL,
+		forward_type TEXT,
+		instance_name TEXT,
+		forward_info TEXT,
+		created_at INTEGER NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS webhook_settings (
@@ -470,7 +794,13 @@ func initDB() error {
 		events TEXT NOT NULL,
 		timeout INTEGER NOT NULL DEFAULT 5,
 		msg_type TEXT NOT NULL DEFAULT 'markdown',
-		updated_at TEXT NOT NULL
+		updated_at INTEGER NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS db_version (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		version TEXT NOT NULL,
+		updated_at INTEGER NOT NULL
 	);
 	`
 
@@ -644,7 +974,7 @@ func initDB() error {
 	err = db.QueryRow("SELECT COUNT(*) FROM webhook_settings").Scan(&webhookCount)
 	if err == nil && webhookCount == 0 {
 		_, err = db.Exec("INSERT INTO webhook_settings (enabled, url, secret, events, timeout, msg_type, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-			0, "", "", "attack,ip_blocked", 5, "markdown", time.Now().Format(time.RFC3339))
+			0, "", "", "attack,ip_blocked", 5, "markdown", getUTCTimestamp())
 		if err != nil {
 			log.Printf("创建默认webhook配置失败: %v", err)
 		}
@@ -797,7 +1127,7 @@ func updateStats(remoteAddr string, statusCode int, isBlocked bool) {
 			"UPDATE statistics SET request_count = ?, pv = ?, uv = ?, unique_ip = ?, blocked_count = ?, attack_ip = ?, pv_peak = ?, block_peak = ?, four_xx_error = ?, four_xx_error_rate = ?, five_xx_error = ?, five_xx_error_rate = ?, four_xx_block_rate = ?, updated_at = ?",
 			currentStats.RequestCount, currentStats.PV, currentStats.UV, currentStats.UniqueIP, currentStats.BlockedCount, currentStats.AttackIP,
 			currentStats.PVPeak, currentStats.BlockPeak, currentStats.FourXxError, currentStats.FourXxErrorRate,
-			currentStats.FiveXxError, currentStats.FiveXxErrorRate, currentStats.FourXxBlockRate, time.Now().Format(time.RFC3339),
+			currentStats.FiveXxError, currentStats.FiveXxErrorRate, currentStats.FourXxBlockRate, getUTCTimestamp(),
 		)
 		if err == nil {
 			return
@@ -869,7 +1199,7 @@ func updateHistory() {
 		if peakUpdated {
 			_, err := db.Exec(
 				"UPDATE statistics SET pv_peak = ?, block_peak = ?, updated_at = ?",
-				currentStats.PVPeak, currentStats.BlockPeak, time.Now().Format(time.RFC3339),
+				currentStats.PVPeak, currentStats.BlockPeak, getUTCTimestamp(),
 			)
 			if err != nil {
 				log.Printf("更新统计峰值到数据库失败: %v", err)
@@ -946,7 +1276,7 @@ func createWAFInstance(name, mode string, rules []string) (*WAFInstance, error) 
 	}
 
 	rulesJSON, _ := json.Marshal(rules)
-	createdAt := time.Now().Format("2006-01-02 15:04:05")
+	createdAt := getUTCTimestamp()
 
 	_, err = db.Exec(
 		"INSERT INTO waf_instances (id, name, mode, rules, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -962,7 +1292,7 @@ func createWAFInstance(name, mode string, rules []string) (*WAFInstance, error) 
 		Mode:      mode,
 		Rules:     rules,
 		WAF:       waf,
-		CreatedAt: createdAt,
+		CreatedAt: fmt.Sprintf("%d", createdAt),
 	}
 
 	wafMutex.Lock()
@@ -1010,7 +1340,7 @@ func createProxyInstance(name string, listenPort int, backend, wafID string) (*P
 		http.ServeFile(w, r, "web/html/502.html")
 	}
 
-	createdAt := time.Now().Format("2006-01-02 15:04:05")
+	createdAt := getUTCTimestamp()
 
 	_, err = db.Exec(
 		"INSERT INTO proxy_instances (id, name, listen_port, backend, waf_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1027,7 +1357,7 @@ func createProxyInstance(name string, listenPort int, backend, wafID string) (*P
 		Backend:    backend,
 		WAFID:      wafID,
 		Proxy:      proxy,
-		CreatedAt:  createdAt,
+		CreatedAt:  fmt.Sprintf("%d", createdAt),
 	}
 	
 	if wafID != "" {
@@ -1118,7 +1448,7 @@ func createPortForwardInstance(name, protocol string, listenPort int, targetAddr
 
 	id := fmt.Sprintf("portforward-%d", time.Now().UnixNano())
 	
-	createdAt := time.Now().Format("2006-01-02 15:04:05")
+	createdAt := getUTCTimestamp()
 
 	_, err := db.Exec(
 		"INSERT INTO port_forward_instances (id, name, protocol, listen_port, target_address, target_port, ip_mode, action_mode, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1138,7 +1468,7 @@ func createPortForwardInstance(name, protocol string, listenPort int, targetAddr
 		IPMode:        ipMode,
 		ActionMode:    actionMode,
 		Status:        "running",
-		CreatedAt:     createdAt,
+		CreatedAt:     fmt.Sprintf("%d", createdAt),
 	}
 
 	portForwardMutex.Lock()
@@ -2011,7 +2341,7 @@ func logIPAccess(ip, mode, action, result, url string, forwardType, instanceName
 	
 	for i := 0; i < 5; i++ {
 		_, err := db.Exec("INSERT INTO ip_access_logs (ip, mode, action, result, url, country, province, city, latitude, longitude, forward_type, instance_name, forward_info, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
-			ip, mode, action, result, url, country, province, city, latitude, longitude, forwardType, instanceName, forwardInfo, getUTCTime())
+			ip, mode, action, result, url, country, province, city, latitude, longitude, forwardType, instanceName, forwardInfo, getUTCTimestamp())
 		if err == nil {
 			return
 		}
@@ -2372,6 +2702,66 @@ func readOnlyMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func handleAbout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	// 获取远程版本信息
+	var remoteVersionInt int
+	var remoteVersionTxt string
+	var hasNewVersion bool
+
+	versionResp, err := client.Get("https://raw.giteeusercontent.com/fangguihua1995/CorazaWafProxy/raw/main/version")
+	if err == nil {
+		defer versionResp.Body.Close()
+		versionContent, _ := io.ReadAll(versionResp.Body)
+		lines := strings.Split(string(versionContent), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "int:") {
+				fmt.Sscanf(line, "int:%d", &remoteVersionInt)
+			} else if strings.HasPrefix(line, "txt:") {
+				remoteVersionTxt = strings.TrimPrefix(line, "txt:")
+			}
+		}
+		if remoteVersionInt > localVersionInt {
+			hasNewVersion = true
+		}
+	}
+
+	// 获取关于页面内容
+	resp, err := client.Get("https://raw.giteeusercontent.com/fangguihua1995/fghcorazawaf/raw/master/aboutwaf.html")
+	if err != nil {
+		log.Printf("获取关于页面失败: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("<p style='color: var(--text-muted); text-align: center; padding: 40px;'>获取关于页面失败</p>"))
+		return
+	}
+	defer resp.Body.Close()
+
+	content, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("读取关于页面内容失败: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("<p style='color: var(--text-muted); text-align: center; padding: 40px;'>读取关于页面失败</p>"))
+		return
+	}
+
+	result := string(content)
+	result = strings.ReplaceAll(result, "{localversion}", frontendVersion)
+	result = strings.ReplaceAll(result, "{remoteversion}", remoteVersionTxt)
+	result = strings.ReplaceAll(result, "{hasnewversion}", strconv.FormatBool(hasNewVersion))
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(result))
+}
+
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		var req struct {
@@ -2425,6 +2815,96 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	})
 
 	http.Redirect(w, r, "/web/html/login.html", http.StatusSeeOther)
+}
+
+func handleDBVersion(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	version := getCurrentDBVersion()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"version": version,
+		"latest":  currentDBVersion,
+		"needUpgrade": version != currentDBVersion,
+	})
+}
+
+func handleDBUpgrade(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	version := getCurrentDBVersion()
+	if version == currentDBVersion {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "数据库已经是最新版本",
+		})
+		return
+	}
+	
+	if version == "1.0" {
+		err := upgradeDBFrom10To11()
+		if err != nil {
+			log.Printf("数据库升级失败: %v", err)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   err.Error(),
+			})
+			return
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "数据库升级已开始",
+			"version": currentDBVersion,
+		})
+		return
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": false,
+		"error":   "不支持的数据库版本",
+	})
+}
+
+func handleDBUpgradeProgress(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	stage, current, total, stepName, completed, errMsg := getUpgradeProgress()
+	
+	if errMsg != "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"stage":   stage,
+			"current": current,
+			"total":   total,
+			"step":    stepName,
+			"completed": completed,
+			"error":   errMsg,
+		})
+		return
+	}
+	
+	if completed {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":   true,
+			"stage":     "completed",
+			"current":   total,
+			"total":     total,
+			"step":      stepName,
+			"completed": completed,
+			"message":   "数据库升级完成",
+		})
+		return
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":   true,
+		"stage":     stage,
+		"current":   current,
+		"total":     total,
+		"step":      stepName,
+		"completed": completed,
+	})
 }
 
 func handleCurrentUser(w http.ResponseWriter, r *http.Request) {
@@ -3951,6 +4431,7 @@ func handleIPAccessLogs(w http.ResponseWriter, r *http.Request) {
 		pageSize := r.URL.Query().Get("pageSize")
 		modeFilter := r.URL.Query().Get("mode")
 		resultFilter := r.URL.Query().Get("result")
+		ipFilter := r.URL.Query().Get("ip")
 		
 		pageNum := 1
 		pageSizeNum := 20
@@ -3986,6 +4467,15 @@ func handleIPAccessLogs(w http.ResponseWriter, r *http.Request) {
 				whereClause = " WHERE result = ?"
 			}
 			args = append(args, resultFilter)
+		}
+		
+		if ipFilter != "" {
+			if whereClause != "" {
+				whereClause += " AND ip = ?"
+			} else {
+				whereClause = " WHERE ip = ?"
+			}
+			args = append(args, ipFilter)
 		}
 		
 		countQuery := "SELECT COUNT(*) FROM ip_access_logs" + whereClause
@@ -4175,7 +4665,7 @@ func handleIPAccessLogsReport(w http.ResponseWriter, r *http.Request) {
 			COALESCE(SUM(CASE WHEN result = 'observe' THEN 1 ELSE 0 END), 0) as observe_traffic,
 			COALESCE(COUNT(DISTINCT CASE WHEN result != 'pass' THEN ip END), 0) as abnormal_ips
 		FROM ip_access_logs 
-		WHERE DATE(created_at) >= ? AND DATE(created_at) <= ?
+		WHERE DATE(created_at, 'unixepoch') >= ? AND DATE(created_at, 'unixepoch') <= ?
 	`, startDate, endDate).Scan(&normalTraffic, &attackTraffic, &observeTraffic, &abnormalIPs)
 
 	if err != nil {
@@ -4186,12 +4676,12 @@ func handleIPAccessLogsReport(w http.ResponseWriter, r *http.Request) {
 
 	dailyRows, err := db.Query(`
 		SELECT 
-			DATE(created_at) as date,
+			DATE(created_at, 'unixepoch') as date,
 			COALESCE(SUM(CASE WHEN result = 'pass' THEN 1 ELSE 0 END), 0) as normal,
 			COALESCE(SUM(CASE WHEN result = 'block' THEN 1 ELSE 0 END), 0) as attack
 		FROM ip_access_logs 
-		WHERE DATE(created_at) >= ? AND DATE(created_at) <= ?
-		GROUP BY DATE(created_at)
+		WHERE DATE(created_at, 'unixepoch') >= ? AND DATE(created_at, 'unixepoch') <= ?
+		GROUP BY DATE(created_at, 'unixepoch')
 		ORDER BY date
 	`, startDate, endDate)
 	
@@ -4210,7 +4700,7 @@ func handleIPAccessLogsReport(w http.ResponseWriter, r *http.Request) {
 			COALESCE(action, 'unknown') as type,
 			COUNT(*) as count
 		FROM ip_access_logs 
-		WHERE DATE(created_at) >= ? AND DATE(created_at) <= ? AND result = 'block'
+		WHERE DATE(created_at, 'unixepoch') >= ? AND DATE(created_at, 'unixepoch') <= ? AND result = 'block'
 		GROUP BY action
 		ORDER BY count DESC
 		LIMIT 10
@@ -4231,7 +4721,7 @@ func handleIPAccessLogsReport(w http.ResponseWriter, r *http.Request) {
 			COALESCE(country, '未知') || ' ' || COALESCE(province, '') || ' ' || COALESCE(city, '') as location,
 			COUNT(*) as count
 		FROM ip_access_logs 
-		WHERE DATE(created_at) >= ? AND DATE(created_at) <= ?
+		WHERE DATE(created_at, 'unixepoch') >= ? AND DATE(created_at, 'unixepoch') <= ?
 		GROUP BY country, province, city
 		ORDER BY count DESC
 		LIMIT 10
@@ -4250,10 +4740,10 @@ func handleIPAccessLogsReport(w http.ResponseWriter, r *http.Request) {
 
 	hourlyRows, err := db.Query(`
 		SELECT 
-			CAST(strftime('%H', created_at) AS INTEGER) as hour,
+			CAST(strftime('%H', created_at, 'unixepoch') AS INTEGER) as hour,
 			COUNT(*) as count
 		FROM ip_access_logs 
-		WHERE DATE(created_at) >= ? AND DATE(created_at) <= ?
+		WHERE DATE(created_at, 'unixepoch') >= ? AND DATE(created_at, 'unixepoch') <= ?
 		GROUP BY hour
 		ORDER BY hour
 	`, startDate, endDate)
@@ -4275,7 +4765,7 @@ func handleIPAccessLogsReport(w http.ResponseWriter, r *http.Request) {
 	topAttackIPRows, err := db.Query(`
 		SELECT ip, COUNT(*) as count
 		FROM ip_access_logs
-		WHERE DATE(created_at) >= ? AND DATE(created_at) <= ? AND result IN ('block', 'observe')
+		WHERE DATE(created_at, 'unixepoch') >= ? AND DATE(created_at, 'unixepoch') <= ? AND result IN ('block', 'observe')
 		GROUP BY ip
 		ORDER BY count DESC
 		LIMIT 10
@@ -4294,7 +4784,7 @@ func handleIPAccessLogsReport(w http.ResponseWriter, r *http.Request) {
 	topAbnormalIPRows, err := db.Query(`
 		SELECT ip, COUNT(*) as count
 		FROM ip_access_logs 
-		WHERE DATE(created_at) >= ? AND DATE(created_at) <= ? AND result != 'pass'
+		WHERE DATE(created_at, 'unixepoch') >= ? AND DATE(created_at, 'unixepoch') <= ? AND result != 'pass'
 		GROUP BY ip
 		ORDER BY count DESC
 		LIMIT 10
@@ -4360,12 +4850,26 @@ func handleTrendData(w http.ResponseWriter, r *http.Request) {
 	getHourlyTrend := func(queryDate string) []HourlyTrend {
 		rows, err := db.Query(`
 			SELECT 
-				CAST(strftime('%H', created_at) AS INTEGER) as hour,
+				CAST(strftime('%H', 
+					CASE 
+						WHEN typeof(created_at) = 'integer' THEN created_at 
+						WHEN typeof(created_at) = 'text' THEN 
+							CASE WHEN created_at GLOB '[0-9]*' THEN CAST(created_at AS INTEGER) 
+							ELSE strftime('%s', created_at) END 
+					END, 
+					'unixepoch', 'localtime') AS INTEGER) as hour,
 				COALESCE(COUNT(DISTINCT CASE WHEN result != 'pass' THEN ip END), 0) as abnormal_ip_count,
 				COALESCE(SUM(CASE WHEN result = 'block' THEN 1 ELSE 0 END), 0) as block_count,
 				COALESCE(SUM(CASE WHEN result = 'observe' THEN 1 ELSE 0 END), 0) as observe_count
 			FROM ip_access_logs 
-			WHERE DATE(created_at) = ?
+			WHERE DATE(
+				CASE 
+					WHEN typeof(created_at) = 'integer' THEN created_at 
+					WHEN typeof(created_at) = 'text' THEN 
+						CASE WHEN created_at GLOB '[0-9]*' THEN CAST(created_at AS INTEGER) 
+						ELSE strftime('%s', created_at) END 
+				END, 
+				'unixepoch', 'localtime') = ?
 			GROUP BY hour
 			ORDER BY hour
 		`, queryDate)
@@ -4479,7 +4983,7 @@ func handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		_, err = db.Exec("UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?", 
-			req.AdminPort, time.Now().Format(time.RFC3339), "admin_port")
+			req.AdminPort, getUTCTimestamp(), "admin_port")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -4754,7 +5258,7 @@ func handleWebhookSettings(w http.ResponseWriter, r *http.Request) {
 		}
 
 		_, err := db.Exec("INSERT INTO webhook_settings (enabled, url, secret, events, timeout, msg_type, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-			req.Enabled, req.URL, req.Secret, req.Events, req.Timeout, req.MsgType, time.Now().Format(time.RFC3339))
+			req.Enabled, req.URL, req.Secret, req.Events, req.Timeout, req.MsgType, getUTCTimestamp())
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -5352,6 +5856,10 @@ func handleRIRImportProgress(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	log.Println("========================================")
+	log.Println("🛡️  Coraza WAF Proxy v0.4.0-v1.1")
+	log.Println("========================================")
+	
 	err := initDB()
 	if err != nil {
 		log.Fatalf("数据库初始化失败: %v", err)
@@ -5367,7 +5875,7 @@ func main() {
 	err = db.QueryRow("SELECT value FROM system_settings WHERE key = ?", "admin_port").Scan(&adminPortStr)
 	if err != nil {
 		adminPortStr = "15501"
-		_, err = db.Exec("INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)", "admin_port", adminPortStr, time.Now().Format(time.RFC3339))
+		_, err = db.Exec("INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)", "admin_port", adminPortStr, getUTCTimestamp())
 		if err != nil {
 			log.Printf("插入默认管理端口失败: %v", err)
 		}
@@ -5404,6 +5912,10 @@ func main() {
 	mux.HandleFunc("/api/login", handleLogin)
 	mux.HandleFunc("/api/logout", readOnlyMiddleware(handleLogout))
 	mux.HandleFunc("/api/current-user", handleCurrentUser)
+	mux.HandleFunc("/api/about", handleAbout)
+	mux.HandleFunc("/api/db-version", handleDBVersion)
+	mux.HandleFunc("/api/db-upgrade", readOnlyMiddleware(handleDBUpgrade))
+	mux.HandleFunc("/api/db-upgrade-progress", handleDBUpgradeProgress)
 	mux.HandleFunc("/api/change-password", readOnlyMiddleware(handleChangePassword))
 	mux.HandleFunc("/api/server-ip", handleServerIP)
 	mux.HandleFunc("/api/ip-location", handleIPLocation)
@@ -5492,7 +6004,13 @@ func main() {
 	mux.HandleFunc("/api/webhook-settings", readOnlyMiddleware(handleWebhookSettings))
 	
 	mux.HandleFunc("/web/html/admin.html", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/html/admin.html")
+		content, err := os.ReadFile("web/html/admin.html")
+		if err != nil {
+			http.Error(w, "Failed to read admin.html", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(strings.ReplaceAll(string(content), "{localversion}", frontendVersion)))
 	}))
 	mux.HandleFunc("/web/js/admin.js", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "web/js/admin.js")

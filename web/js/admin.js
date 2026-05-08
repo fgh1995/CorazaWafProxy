@@ -61,6 +61,8 @@ async function loadCurrentUser() {
             if (settingsUsernameElement) {
                 settingsUsernameElement.value = result.username;
             }
+            
+            await checkAndUpgradeDatabase();
         } else {
             isLoggedIn = false;
             const usernameElement = document.getElementById('current-username');
@@ -379,10 +381,20 @@ function formatUTCTimeToLocal(utcTimeString) {
     if (!utcTimeString) return '';
     
     let date;
-    if (utcTimeString.includes('T')) {
-        date = new Date(utcTimeString);
+    
+    const timeStr = String(utcTimeString).trim();
+    
+    if (/^\d+$/.test(timeStr)) {
+        const timestamp = parseInt(timeStr, 10);
+        if (timestamp > 100000000000) {
+            date = new Date(timestamp);
+        } else {
+            date = new Date(timestamp * 1000);
+        }
+    } else if (timeStr.includes('T')) {
+        date = new Date(timeStr);
     } else {
-        date = new Date(utcTimeString.replace(' ', 'T') + 'Z');
+        date = new Date(timeStr.replace(' ', 'T') + 'Z');
     }
     
     if (isNaN(date.getTime())) return utcTimeString;
@@ -400,6 +412,180 @@ function showAlert(title, message) {
     document.getElementById('alertTitle').textContent = title;
     document.getElementById('alertMessage').textContent = message;
     document.getElementById('alertModal').classList.remove('modal-hidden');
+}
+
+function showUpgradeModal() {
+    document.getElementById('upgradeModal').classList.remove('modal-hidden');
+}
+
+function closeUpgradeModal() {
+    document.getElementById('upgradeModal').classList.add('modal-hidden');
+    location.reload();
+}
+
+function setUpgradeStep(stepId, status) {
+    const step = document.getElementById(stepId);
+    if (step) {
+        if (status === 'done') {
+            step.innerHTML = '✓ ' + step.textContent.substring(2);
+            step.style.color = 'var(--success-green)';
+        } else if (status === 'current') {
+            step.style.color = 'var(--primary-blue)';
+            step.style.fontWeight = '600';
+        } else {
+            step.style.color = 'var(--text-muted)';
+            step.style.fontWeight = 'normal';
+        }
+    }
+}
+
+function setUpgradeProgress(percent, message) {
+    const progressBar = document.getElementById('upgradeProgressBar');
+    const progressText = document.getElementById('upgradeProgressText');
+    const upgradeMessage = document.getElementById('upgradeMessage');
+    
+    if (progressBar) progressBar.style.width = percent + '%';
+    if (progressText) progressText.textContent = percent + '%';
+    if (upgradeMessage) upgradeMessage.textContent = message;
+}
+
+async function checkAndUpgradeDatabase() {
+    try {
+        const response = await fetch('/api/db-version');
+        const result = await response.json();
+        
+        if (result.success && result.needUpgrade) {
+            showUpgradeModal();
+            await performDatabaseUpgrade();
+        }
+    } catch (error) {
+        console.error('检查数据库版本失败:', error);
+    }
+}
+
+async function pollUpgradeProgress() {
+    return new Promise((resolve, reject) => {
+        const pollInterval = setInterval(async () => {
+            try {
+                const response = await fetch('/api/db-upgrade-progress');
+                const result = await response.json();
+                
+                if (!result.success) {
+                    clearInterval(pollInterval);
+                    reject(new Error(result.error || '查询进度失败'));
+                    return;
+                }
+                
+                const total = result.total || 1;
+                const current = result.current || 0;
+                const percent = Math.round((current / total) * 100);
+                
+                setUpgradeProgress(percent, result.step || '处理中...');
+                
+                if (result.completed) {
+                    clearInterval(pollInterval);
+                    resolve(result);
+                    return;
+                }
+                
+                if (result.stage === 'completed') {
+                    clearInterval(pollInterval);
+                    resolve(result);
+                }
+            } catch (error) {
+                clearInterval(pollInterval);
+                reject(error);
+            }
+        }, 500);
+    });
+}
+
+async function performDatabaseUpgrade() {
+    try {
+        setUpgradeStep('stepCheck', 'current');
+        setUpgradeProgress(5, '正在检查数据库版本...');
+        
+        const versionResponse = await fetch('/api/db-version');
+        const versionResult = await versionResponse.json();
+        
+        if (!versionResult.success || !versionResult.needUpgrade) {
+            setUpgradeProgress(100, '数据库已是最新版本');
+            setUpgradeStep('stepCheck', 'done');
+            setUpgradeStep('stepComplete', 'done');
+            enableUpgradeCloseBtn();
+            return;
+        }
+        
+        setUpgradeStep('stepCheck', 'done');
+        setUpgradeStep('stepBackup', 'current');
+        setUpgradeProgress(10, '正在准备升级数据...');
+        
+        const upgradeResponse = await fetch('/api/db-upgrade', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        const upgradeResult = await upgradeResponse.json();
+        
+        if (!upgradeResult.success) {
+            setUpgradeProgress(100, '升级失败: ' + (upgradeResult.error || '未知错误'));
+            document.getElementById('upgradeIcon').textContent = '❌';
+            document.getElementById('upgradeMessage').style.color = 'var(--danger-red)';
+            setUpgradeStep('stepUpgrade', 'error');
+            enableUpgradeCloseBtn();
+            return;
+        }
+        
+        setUpgradeStep('stepBackup', 'done');
+        setUpgradeStep('stepUpgrade', 'current');
+        
+        try {
+            const completedResult = await pollUpgradeProgress();
+            
+            if (completedResult.message && completedResult.message.includes('完成')) {
+                setUpgradeProgress(100, '数据库升级成功');
+                setUpgradeStep('stepUpgrade', 'done');
+                setUpgradeStep('stepComplete', 'done');
+                document.getElementById('upgradeIcon').textContent = '✅';
+            } else {
+                setUpgradeProgress(100, completedResult.step || '升级完成');
+                setUpgradeStep('stepUpgrade', 'done');
+                setUpgradeStep('stepComplete', 'done');
+                document.getElementById('upgradeIcon').textContent = '✅';
+            }
+        } catch (pollError) {
+            setUpgradeProgress(100, '升级完成');
+            setUpgradeStep('stepUpgrade', 'done');
+            setUpgradeStep('stepComplete', 'done');
+            document.getElementById('upgradeIcon').textContent = '✅';
+            console.error('轮询进度失败:', pollError);
+        }
+        
+        enableUpgradeCloseBtn();
+        
+    } catch (error) {
+        console.error('数据库升级失败:', error);
+        setUpgradeProgress(100, '升级失败: ' + error.message);
+        document.getElementById('upgradeIcon').textContent = '❌';
+        document.getElementById('upgradeMessage').style.color = 'var(--danger-red)';
+        enableUpgradeCloseBtn();
+    }
+}
+
+function enableUpgradeCloseBtn() {
+    const btn = document.getElementById('upgradeCloseBtn');
+    if (btn) {
+        btn.disabled = false;
+        btn.style.opacity = '1';
+        btn.style.cursor = 'pointer';
+        btn.textContent = '完成';
+    }
+}
+
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function showTooltip(x, y, value, time) {
@@ -1097,7 +1283,7 @@ async function loadLogs() {
                     let actionText = '';
                     
                     if (log.action === 'detected') {
-                        bgColor = '#FFBF00';
+                        bgColor = '#F97316';
                         textColor = '#ffffff';
                         actionText = '未拦截';
                     } else if (log.action === 'blocked') {
@@ -1111,7 +1297,7 @@ async function loadLogs() {
                             bgColor = 'rgba(34, 197, 94, 1)';
                             textColor = '#ffffff';
                         } else if (log.filterType === 'whitelist_no_match' || log.filterType === 'blacklist_match') {
-                            bgColor = '#FFC107';
+                            bgColor = '#F97316';
                             textColor = '#ffffff';
                         } else {
                             bgColor = 'rgba(34, 197, 94, 1)';
@@ -1731,7 +1917,7 @@ async function loadIPAccessLogs() {
         container.innerHTML = '';
         
         if (!result.success || result.data.length === 0) {
-            container.innerHTML = '<tr><td colspan="9" style="text-align: center; color: var(--text-muted);">暂无数据</td></tr>';
+            container.innerHTML = '<tr><td colspan="10" style="text-align: center; color: var(--text-muted);">暂无数据</td></tr>';
             ipAccessLogsTotalPages = 0;
             updateIPAccessLogsPagination(0, 1, 20);
             return;
@@ -1757,7 +1943,7 @@ async function loadIPAccessLogs() {
             }[log.action] || log.action;
             
             const resultText = log.result === 'pass' ? '通过' : (log.result === 'observe' ? '观察' : '拦截');
-            const resultColor = log.result === 'pass' ? 'rgba(34, 197, 94, 1)' : (log.result === 'observe' ? 'rgba(251, 191, 36, 1)' : 'rgba(239, 68, 68, 1)');
+            const resultColor = log.result === 'pass' ? 'rgba(34, 197, 94, 1)' : (log.result === 'observe' ? 'rgba(249, 115, 22, 1)' : 'rgba(239, 68, 68, 1)');
 
             const forwardTypeText = {
                 'reverse_proxy': '反代',
@@ -1770,12 +1956,15 @@ async function loadIPAccessLogs() {
             if (log.city) location.push(log.city);
             const locationText = location.length > 0 ? location.join(' ') : '-';
 
+            const urlLink = log.url ? `<a href="${log.url}" target="_blank" rel="noopener noreferrer" style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; text-decoration: none; color: var(--text-primary);">${log.url}</a>` : '-';
+            
             row.innerHTML = `
+                <td><span style="background-color: ${resultColor}; color: #ffffff; padding: 2px 8px; border-radius:4px; font-size: 12px;">${resultText}</span></td>
+                <td>${actionText}</td>
+                <td>${urlLink}</td>
                 <td>${log.ip}</td>
                 <td>${locationText}</td>
                 <td>${modeText}</td>
-                <td>${actionText}</td>
-                <td><span style="background-color: ${resultColor}; color: #ffffff; padding: 2px 8px; border-radius:4px; font-size: 12px;">${resultText}</span></td>
                 <td>${forwardTypeText}</td>
                 <td>${log.instance_name || '-'}</td>
                 <td style="font-family: monospace; font-size: 12px;">${log.forward_info || '-'}</td>
@@ -1791,7 +1980,7 @@ async function loadIPAccessLogs() {
         console.error('加载IP访问日志失败:', error);
         const container = document.getElementById('ipAccessLogsContainer');
         if (container) {
-            container.innerHTML = '<tr><td colspan="9" style="text-align: center; color: var(--text-muted);">加载失败</td></tr>';
+            container.innerHTML = '<tr><td colspan="10" style="text-align: center; color: var(--text-muted);">加载失败</td></tr>';
         }
     }
 }
@@ -2122,7 +2311,6 @@ async function loadStats() {
         renderAttackChartMobile();
         renderTrendChart();
         renderTrendChartMobile();
-        bindTrendEvents();
         
         console.log('图表渲染完成');
         console.log('QPS历史数据:', historyData.qpsHistory);
@@ -4801,6 +4989,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     loadPortForwardInstances();
     loadLogs();
     loadStats();
+    bindTrendEvents();
     
     setTimeout(() => {
         updateSlider('actionTabContainer', 'actionTabSlider', 'geoTabAccess');
