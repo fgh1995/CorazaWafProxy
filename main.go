@@ -32,8 +32,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.0-v1.1"
-const localVersionInt = 4001 // 版本整数值，用于对比
+const frontendVersion = "v0.4.02-v1.1"
+const localVersionInt = 4002// 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
@@ -2735,7 +2735,7 @@ func handleAbout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 获取关于页面内容
-	resp, err := client.Get("https://raw.giteeusercontent.com/fangguihua1995/fghcorazawaf/raw/master/aboutwaf.html")
+	resp, err := client.Get("https://raw.giteeusercontent.com/fangguihua1995/CorazaWafProxy/raw/main/about.html")
 	if err != nil {
 		log.Printf("获取关于页面失败: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
