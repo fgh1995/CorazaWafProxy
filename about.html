@@ -245,9 +245,9 @@
     // ============================================
     // 后端模板引擎需要替换以下三个变量的值
     // ============================================
-    var LOCAL_VERSION = "v1.2.3";       // 当前版本，后端替换为 {{.localversion}}
-    var REMOTE_VERSION = "v1.2.5";      // 远程最新版本，后端替换为 {{.remoteversion}}
-    var HAS_NEW_VERSION = "false";      // 是否有新版本，后端替换为 {{.hasnewversion}}
+    var LOCAL_VERSION = "{localversion}";       // 当前版本，后端替换为 {{.localversion}}
+    var REMOTE_VERSION = "{remoteversion}";      // 远程最新版本，后端替换为 {{.remoteversion}}
+    var HAS_NEW_VERSION = "{hasnewversion}";      // 是否有新版本，后端替换为 {{.hasnewversion}}
     // 可选值: "true" / "false" / "1" / "0" / "yes" / "no"
     // ============================================
     
