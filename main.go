@@ -5863,7 +5863,7 @@ func handleRIRImportProgress(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	log.Println("========================================")
-	log.Println("🛡️  Coraza WAF Proxy v0.4.0-v1.1")
+	log.Printf("🛡️  Coraza WAF Proxy %s", frontendVersion)
 	log.Println("========================================")
 	
 	err := initDB()
