@@ -44,6 +44,8 @@ let isLoggedIn = false;
 let currentLogsPage = 1;
 let totalLogsPages = 1;
 let currentLogsPageSize = 20;
+let fullClientStats = null;
+let top5ClientStats = null;
 
 async function loadCurrentUser() {
     try {
@@ -1250,7 +1252,11 @@ async function deletePortForwardInstance(id) {
 async function loadLogs() {
     try {
         const filter = document.getElementById('logFilter').value;
-        const url = `/api/logs?filter=${filter}&page=${currentLogsPage}&pageSize=${currentLogsPageSize}`;
+        const searchKeyword = document.getElementById('logSearch').value;
+        let url = `/api/logs?filter=${filter}&page=${currentLogsPage}&pageSize=${currentLogsPageSize}`;
+        if (searchKeyword) {
+            url += `&search=${encodeURIComponent(searchKeyword)}`;
+        }
         const response = await fetch(url);
         const result = await response.json();
         
@@ -1899,6 +1905,7 @@ async function loadIPAccessLogs() {
     try {
         const modeFilter = document.getElementById('ipLogModeFilter').value;
         const resultFilter = document.getElementById('ipLogResultFilter').value;
+        const searchKeyword = document.getElementById('ipLogSearch').value;
         
         let url = `/api/ip-access-logs?page=${ipAccessLogsCurrentPage}&pageSize=${ipAccessLogsPageSize}`;
         if (modeFilter) {
@@ -1906,6 +1913,9 @@ async function loadIPAccessLogs() {
         }
         if (resultFilter) {
             url += `&result=${resultFilter}`;
+        }
+        if (searchKeyword) {
+            url += `&search=${encodeURIComponent(searchKeyword)}`;
         }
         
         const response = await fetch(url);
@@ -2037,14 +2047,14 @@ function resetIPAccessLogsPage() {
 async function clearIPAccessLogs() {
     showConfirm('确定要清空所有IP访问日志吗？', async (confirmed) => {
         if (!confirmed) return;
-        
+
         try {
             const response = await fetch('/api/ip-access-logs', {
                 method: 'DELETE'
             });
-            
+
             const data = await response.json();
-            
+
             if (data.success) {
                 showAlert('成功', '日志已清空');
                 ipAccessLogsCurrentPage = 1;
@@ -2055,6 +2065,38 @@ async function clearIPAccessLogs() {
         } catch (error) {
             console.error('清空日志失败:', error);
             showAlert('错误', '清空日志失败');
+        }
+    });
+}
+
+async function deleteIPAccessSearchResults() {
+    const searchKeyword = document.getElementById('ipLogSearch').value;
+    if (!searchKeyword) {
+        showAlert('提示', '请输入搜索关键字');
+        return;
+    }
+
+    showConfirm(`确定要删除包含"${searchKeyword}"的所有IP访问日志吗？`, async (confirmed) => {
+        if (!confirmed) return;
+
+        try {
+            const response = await fetch(`/api/ip-access-logs?search=${encodeURIComponent(searchKeyword)}`, {
+                method: 'DELETE'
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                showAlert('成功', `已删除 ${data.deleted || 0} 条日志`);
+                document.getElementById('ipLogSearch').value = '';
+                ipAccessLogsCurrentPage = 1;
+                loadIPAccessLogs();
+            } else {
+                showAlert('错误', '删除日志失败: ' + data.error);
+            }
+        } catch (error) {
+            console.error('删除日志失败:', error);
+            showAlert('错误', '删除日志失败');
         }
     });
 }
@@ -2077,14 +2119,14 @@ function parseRules(rulesStr) {
 async function clearLogs() {
     showConfirm('确定要清空所有日志吗？', async (confirmed) => {
         if (!confirmed) return;
-        
+
         try {
             const response = await fetch('/api/logs', {
                 method: 'DELETE'
             });
-            
+
             const data = await response.json();
-            
+
             if (data.success) {
                 showAlert('成功', '日志已清空');
                 loadLogs();
@@ -2094,6 +2136,37 @@ async function clearLogs() {
         } catch (error) {
             console.error('清空日志失败:', error);
             showAlert('错误', '清空日志失败');
+        }
+    });
+}
+
+async function deleteSearchResults() {
+    const searchKeyword = document.getElementById('logSearch').value;
+    if (!searchKeyword) {
+        showAlert('提示', '请输入搜索关键字');
+        return;
+    }
+
+    showConfirm(`确定要删除包含"${searchKeyword}"的所有日志吗？`, async (confirmed) => {
+        if (!confirmed) return;
+
+        try {
+            const response = await fetch(`/api/logs?search=${encodeURIComponent(searchKeyword)}`, {
+                method: 'DELETE'
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                showAlert('成功', `已删除 ${data.deleted || 0} 条日志`);
+                document.getElementById('logSearch').value = '';
+                loadLogs();
+            } else {
+                showAlert('错误', '删除日志失败: ' + data.error);
+            }
+        } catch (error) {
+            console.error('删除日志失败:', error);
+            showAlert('错误', '删除日志失败');
         }
     });
 }
@@ -2114,16 +2187,20 @@ async function logout() {
 
 async function loadStats() {
     try {
-        const [statsResponse, historyResponse] = await Promise.all([
+        const [statsResponse, historyResponse, clientStatsResponse] = await Promise.all([
             fetch('/api/statistics'),
-            fetch('/api/statistics/history')
+            fetch('/api/statistics/history'),
+            fetch('/api/client-stats')
         ]);
         
         const stats = await statsResponse.json();
         const history = await historyResponse.json();
+        const clientStats = await clientStatsResponse.json();
         
         statsData = stats;
         historyData = history;
+        top5ClientStats = clientStats;
+        fullClientStats = null;
         
         console.log('statsData:', statsData);
         console.log('accessGeoDistribution:', statsData.accessGeoDistribution);
@@ -2222,12 +2299,12 @@ async function loadStats() {
                 return timeB.localeCompare(timeA);
             });
             
-            const recentAttacks = Array.isArray(allLogs) ? allLogs.slice(0, 10) : [];
+            const recentAttacks = Array.isArray(allLogs) ? allLogs.slice(0, 5) : [];
 
             recentAttacksContainer.innerHTML = recentAttacks.map(log => {
                 let statusText = '未拦截';
                 let statusColor = 'var(--text-secondary)';
-                let barColor = 'rgba(0, 0, 0, 0.015)';
+                let barColor = 'rgba(0, 0, 0, 0.03)';
                 
                 if (log.action === 'detected' || log.result === 'observe') {
                     statusText = '观察';
@@ -2243,7 +2320,6 @@ async function loadStats() {
                 
                 return `
                 <div class="rank-list-row">
-                    <div class="rank-list-bg"></div>
                     <div class="rank-list-bar" style="width: 100%; background: ${barColor};"></div>
                     <span class="rank-list-name" title="${url}">${url}</span>
                     <span class="rank-list-value" style="color: ${statusColor};">${statusText}</span>
@@ -2259,15 +2335,14 @@ async function loadStats() {
             const topAttackIPs = (reportResult.data && reportResult.data.topAttackIPs) || [];
 
             if (topAttackIPs.length === 0) {
-                attackIPRankingsContainer.innerHTML = '<div style="display: flex; justify-content: center; align-items: center; height: 100px; color: var(--text-muted);">暂无数据</div>';
+                attackIPRankingsContainer.innerHTML = '<div style="display: flex; justify-content: center; align-items: center; height: 100%; color: var(--text-muted);">暂无数据</div>';
             } else {
                 const maxCount = Math.max(...topAttackIPs.map(ip => ip.count), 1);
-                attackIPRankingsContainer.innerHTML = topAttackIPs.map((ip, index) => {
+                attackIPRankingsContainer.innerHTML = topAttackIPs.slice(0, 5).map((ip, index) => {
                     const rankColor = index < 3 ? '#ef4444' : 'var(--text-secondary)';
                     const percentage = (ip.count / maxCount) * 100;
                     return `
                     <div class="rank-list-row">
-                        <div class="rank-list-bg"></div>
                         <div class="rank-list-bar" style="width: ${percentage}%;"></div>
                         <span class="rank-list-name" style="font-family: monospace;">${ip.ip}</span>
                         <span class="rank-list-value" style="color: ${rankColor}; font-weight: 600;">${ip.count}</span>
@@ -2282,12 +2357,11 @@ async function loadStats() {
                     attackIPRankingsMobileContainer.innerHTML = '<div style="display: flex; justify-content: center; align-items: center; height: 80px; color: var(--text-muted); font-size: 12px;">暂无数据</div>';
                 } else {
                     const maxCount = Math.max(...topAttackIPs.map(ip => ip.count), 1);
-                    attackIPRankingsMobileContainer.innerHTML = topAttackIPs.slice(0, 10).map((ip, index) => {
+                    attackIPRankingsMobileContainer.innerHTML = topAttackIPs.slice(0, 5).map((ip, index) => {
                         const rankColor = index < 3 ? '#ef4444' : 'var(--text-secondary)';
                         const percentage = (ip.count / maxCount) * 100;
                         return `
                         <div class="rank-list-item">
-                            <div class="rank-list-bg"></div>
                             <div class="rank-list-bar" style="width: ${percentage}%;"></div>
                             <span class="rank-list-name" style="font-family: monospace; font-size: 11px;">${ip.ip}</span>
                             <span class="rank-list-value" style="color: ${rankColor}; font-weight: 600; font-size: 11px;">${ip.count}</span>
@@ -2312,6 +2386,143 @@ async function loadStats() {
         renderTrendChart();
         renderTrendChartMobile();
         
+        // 渲染客户端统计
+        if (top5ClientStats.success) {
+            const clientStatsContainer = document.getElementById('clientStatsContainer');
+            
+            if (clientStatsContainer) {
+                const platforms = top5ClientStats.platforms || [];
+                const browsers = top5ClientStats.browsers || [];
+                const maxItems = Math.max(platforms.length, browsers.length);
+                const rankColors = ['#FF6B6B', '#FFA726', '#FFD93D', '#6BCB77', '#4D96FF'];
+                
+                let html = `
+                <div style="display: flex; gap: 20px; align-items: center; width: 100%; height: 100%;">
+                    <div style="width: 150px; display: flex; justify-content: center;">
+                        <canvas id="clientDonutChart" width="140" height="140"></canvas>
+                    </div>
+                    <div style="flex: 1; display: flex; gap: 15px;">
+                        <div style="flex: 1;">
+                `;
+                
+                // 渲染平台列
+                for (let i = 0; i < maxItems; i++) {
+                    if (platforms[i]) {
+                        const p = platforms[i];
+                        const rankColor = i < rankColors.length ? rankColors[i] : '#4D96FF';
+                        html += `
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0;">
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <div style="width: 8px; height: 8px; border-radius: 50%; background: ${rankColor};"></div>
+                                <span style="color: var(--text-primary); font-size: 14px;">${p.name}</span>
+                            </div>
+                            <span style="color: #000; font-weight: 600; font-size: 14px;">${formatNumber(p.count)}</span>
+                        </div>
+                        `;
+                    } else {
+                        html += `<div style="padding: 6px 0;"></div>`;
+                    }
+                }
+                
+                html += `
+                        </div>
+                        <div style="flex: 1;">
+                `;
+                
+                // 渲染浏览器列
+                for (let i = 0; i < maxItems; i++) {
+                    if (browsers[i]) {
+                        const b = browsers[i];
+                        const rankColor = i < rankColors.length ? rankColors[i] : '#4D96FF';
+                        html += `
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0;">
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <div style="width: 8px; height: 8px; border-radius: 50%; background: ${rankColor};"></div>
+                                <span style="color: var(--text-primary); font-size: 14px;">${b.name}</span>
+                            </div>
+                            <span style="color: #000; font-weight: 600; font-size: 14px;">${formatNumber(b.count)}</span>
+                        </div>
+                        `;
+                    } else {
+                        html += `<div style="padding: 6px 0;"></div>`;
+                    }
+                }
+                
+                html += `
+                        </div>
+                    </div>
+                </div>
+                `;
+                
+                clientStatsContainer.innerHTML = html;
+                
+                // 绘制同心圆饼图
+                drawNestedDonutChart('clientDonutChart', platforms, browsers, rankColors);
+            }
+        }
+        
+        // 手机端客户端统计渲染
+        const clientStatsContainerMobile = document.getElementById('clientStatsContainer-mobile');
+        if (clientStatsContainerMobile && top5ClientStats.success) {
+            const platforms = top5ClientStats.platforms || [];
+            const browsers = top5ClientStats.browsers || [];
+            const maxItems = Math.max(platforms.length, browsers.length);
+            const rankColors = ['#FF6B6B', '#FFA726', '#FFD93D', '#6BCB77', '#4D96FF'];
+            
+            let html = `
+                <div style="display: flex; justify-content: center; padding: 10px 0;">
+                    <canvas id="clientDonutChart-mobile" width="160" height="160"></canvas>
+                </div>
+                <div style="display: flex; gap: 15px; padding: 10px; font-size: 12px;">
+                    <div style="flex: 1;">
+            `;
+            
+            for (let i = 0; i < maxItems; i++) {
+                if (platforms[i]) {
+                    const p = platforms[i];
+                    html += `
+                    <div style="display: flex; justify-content: space-between; padding: 4px 0;">
+                        <div style="display: flex; align-items: center; gap: 5px;">
+                            <div style="width: 8px; height: 8px; border-radius: 50%; background: ${rankColors[i]};"></div>
+                            <span>${p.name}</span>
+                        </div>
+                        <span style="font-weight: 600;">${formatNumber(p.count)}</span>
+                    </div>
+                    `;
+                }
+            }
+            
+            html += `
+                    </div>
+                    <div style="flex: 1;">
+            `;
+            
+            for (let i = 0; i < maxItems; i++) {
+                if (browsers[i]) {
+                    const b = browsers[i];
+                    html += `
+                    <div style="display: flex; justify-content: space-between; padding: 4px 0;">
+                        <div style="display: flex; align-items: center; gap: 5px;">
+                            <div style="width: 8px; height: 8px; border-radius: 50%; background: ${rankColors[i]};"></div>
+                            <span>${b.name}</span>
+                        </div>
+                        <span style="font-weight: 600;">${formatNumber(b.count)}</span>
+                    </div>
+                    `;
+                }
+            }
+            
+            html += `
+                    </div>
+                </div>
+            `;
+            
+            clientStatsContainerMobile.innerHTML = html;
+            
+            // 绘制手机端饼图
+            drawNestedDonutChart('clientDonutChart-mobile', platforms, browsers, rankColors);
+        }
+        
         console.log('图表渲染完成');
         console.log('QPS历史数据:', historyData.qpsHistory);
         console.log('流量历史数据:', historyData.trafficHistory);
@@ -2321,24 +2532,536 @@ async function loadStats() {
     }
 }
 
+function drawNestedDonutChart(canvasId, platformData, browserData, colors) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    const centerX = canvas.width / 2;
+    const centerY = canvas.height / 2;
+    const scale = centerX / 70;
+    
+    const rankColors = colors || ['#FF6B6B', '#FFA726', '#FFD93D', '#6BCB77', '#4D96FF'];
+    
+    const outerOuterRadius = 60 * scale;
+    const outerInnerRadius = 43 * scale;
+    const innerOuterRadius = 30 * scale;
+    const innerInnerRadius = 15 * scale;
+
+    let hoveredSlice = null;
+
+    function getMousePos(evt) {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        return {
+            x: (evt.clientX - rect.left) * scaleX,
+            y: (evt.clientY - rect.top) * scaleY
+        };
+    }
+
+    function normalizeAngle(angle) {
+        while (angle < 0) angle += 2 * Math.PI;
+        while (angle >= 2 * Math.PI) angle -= 2 * Math.PI;
+        return angle;
+    }
+
+    function isPointInArc(x, y, cx, cy, outerR, innerR, startAngle, endAngle) {
+        const dx = x - cx;
+        const dy = y - cy;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < innerR || dist > outerR) return false;
+        
+        let angle = Math.atan2(dy, dx);
+        if (angle < -Math.PI / 2) angle += 2 * Math.PI;
+        
+        let start = startAngle;
+        if (start < -Math.PI / 2) start += 2 * Math.PI;
+        let end = endAngle;
+        if (end < -Math.PI / 2) end += 2 * Math.PI;
+        
+        if (start <= end) {
+            return angle >= start && angle <= end;
+        } else {
+            return angle >= start || angle <= end;
+        }
+    }
+
+    function drawChart(hoveredItem = null) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        if (platformData && platformData.length > 0) {
+            const totalOuter = platformData.reduce((sum, item) => sum + item.count, 0);
+            let currentAngle = -Math.PI / 2;
+            
+            platformData.forEach((item, index) => {
+                const sliceAngle = (item.count / totalOuter) * 2 * Math.PI;
+                const color = index < rankColors.length ? rankColors[index] : '#4D96FF';
+                
+                let offsetX = 0, offsetY = 0;
+                if (hoveredItem && hoveredItem.type === 'platform' && hoveredItem.index === index) {
+                    const midAngle = currentAngle + sliceAngle / 2;
+                    offsetX = Math.cos(midAngle) * 5 * scale;
+                    offsetY = Math.sin(midAngle) * 5 * scale;
+                }
+                
+                ctx.beginPath();
+                ctx.arc(centerX + offsetX, centerY + offsetY, outerOuterRadius, currentAngle, currentAngle + sliceAngle);
+                ctx.arc(centerX + offsetX, centerY + offsetY, outerInnerRadius, currentAngle + sliceAngle, currentAngle, true);
+                ctx.closePath();
+                ctx.fillStyle = color;
+                ctx.fill();
+                
+                currentAngle += sliceAngle;
+            });
+        }
+        
+        if (browserData && browserData.length > 0) {
+            const totalInner = browserData.reduce((sum, item) => sum + item.count, 0);
+            let currentAngle = -Math.PI / 2;
+            
+            browserData.forEach((item, index) => {
+                const sliceAngle = (item.count / totalInner) * 2 * Math.PI;
+                const color = index < rankColors.length ? rankColors[index] : '#4D96FF';
+                
+                let offsetX = 0, offsetY = 0;
+                if (hoveredItem && hoveredItem.type === 'browser' && hoveredItem.index === index) {
+                    const midAngle = currentAngle + sliceAngle / 2;
+                    offsetX = Math.cos(midAngle) * 4 * scale;
+                    offsetY = Math.sin(midAngle) * 4 * scale;
+                }
+                
+                ctx.beginPath();
+                ctx.arc(centerX + offsetX, centerY + offsetY, innerOuterRadius, currentAngle, currentAngle + sliceAngle);
+                ctx.arc(centerX + offsetX, centerY + offsetY, innerInnerRadius, currentAngle + sliceAngle, currentAngle, true);
+                ctx.closePath();
+                ctx.fillStyle = color;
+                ctx.fill();
+                
+                currentAngle += sliceAngle;
+            });
+        }
+        
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, innerInnerRadius - 2, 0, 2 * Math.PI);
+        ctx.fillStyle = '#fff';
+        ctx.fill();
+    }
+
+    function showTooltip(e, data, percent) {
+        let tooltip = document.getElementById('chart-tooltip');
+        if (!tooltip) {
+            tooltip = document.createElement('div');
+            tooltip.id = 'chart-tooltip';
+            tooltip.style.cssText = `
+                position: fixed;
+                background: #fff;
+                color: #333;
+                padding: 8px 14px;
+                border-radius: 6px;
+                font-size: 13px;
+                pointer-events: none;
+                z-index: 10000;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            `;
+            document.body.appendChild(tooltip);
+        }
+        
+        tooltip.innerHTML = `<strong>${data.name}</strong><br>数量: ${data.count} (${percent}%)`;
+        tooltip.style.left = (e.clientX + 15) + 'px';
+        tooltip.style.top = (e.clientY - 10) + 'px';
+        tooltip.style.display = 'block';
+    }
+
+    function hideTooltip() {
+        const tooltip = document.getElementById('chart-tooltip');
+        if (tooltip) tooltip.style.display = 'none';
+    }
+
+    canvas.onmousemove = function(e) {
+        const pos = getMousePos(e);
+        
+        let found = null;
+        
+        if (platformData && platformData.length > 0) {
+            const totalOuter = platformData.reduce((sum, item) => sum + item.count, 0);
+            let currentAngle = -Math.PI / 2;
+            
+            for (let i = 0; i < platformData.length; i++) {
+                const sliceAngle = (platformData[i].count / totalOuter) * 2 * Math.PI;
+                const endAngle = currentAngle + sliceAngle;
+                
+                if (isPointInArc(pos.x, pos.y, centerX, centerY, outerOuterRadius, outerInnerRadius, currentAngle, endAngle)) {
+                    const percent = Math.round((platformData[i].count / totalOuter) * 100);
+                    found = { type: 'platform', index: i, data: platformData[i], percent };
+                    break;
+                }
+                currentAngle = endAngle;
+            }
+        }
+        
+        if (!found && browserData && browserData.length > 0) {
+            const totalInner = browserData.reduce((sum, item) => sum + item.count, 0);
+            let currentAngle = -Math.PI / 2;
+            
+            for (let i = 0; i < browserData.length; i++) {
+                const sliceAngle = (browserData[i].count / totalInner) * 2 * Math.PI;
+                const endAngle = currentAngle + sliceAngle;
+                
+                if (isPointInArc(pos.x, pos.y, centerX, centerY, innerOuterRadius, innerInnerRadius, currentAngle, endAngle)) {
+                    const percent = Math.round((browserData[i].count / totalInner) * 100);
+                    found = { type: 'browser', index: i, data: browserData[i], percent };
+                    break;
+                }
+                currentAngle = endAngle;
+            }
+        }
+        
+        if (found) {
+            canvas.style.cursor = 'pointer';
+            drawChart(found);
+            showTooltip(e, found.data, found.percent);
+            hoveredSlice = found;
+        } else {
+            canvas.style.cursor = 'default';
+            drawChart(null);
+            hideTooltip();
+            hoveredSlice = null;
+        }
+    };
+
+    canvas.onmouseleave = function() {
+        hideTooltip();
+        hoveredSlice = null;
+        drawChart(null);
+    };
+
+    canvas.onclick = function(e) {
+        if (hoveredSlice) {
+            showTooltip(e, hoveredSlice.data, hoveredSlice.percent);
+        }
+    };
+
+    drawChart();
+}
+
+async function openClientModal(event) {
+    event.preventDefault();
+    
+    const modal = document.getElementById('clientDetailModal');
+    modal.classList.remove('modal-hidden');
+    
+    try {
+        // 重新获取完整数据（limit=0表示不限制）
+        const response = await fetch('/api/client-stats?limit=0');
+        fullClientStats = await response.json();
+        
+        if (!fullClientStats.success) {
+            showAlert('提示', '获取客户端数据失败');
+            return;
+        }
+        
+        // 绘制大尺寸同心圆饼图
+        drawModalNestedDonutChart('clientModalDonutChart', fullClientStats.platforms, fullClientStats.browsers);
+        
+        // 渲染完整列表
+        renderClientModalList();
+    } catch (error) {
+        console.error('获取客户端数据失败:', error);
+        showAlert('提示', '获取客户端数据失败');
+    }
+}
+
+function closeClientModal() {
+    const modal = document.getElementById('clientDetailModal');
+    modal.classList.add('modal-hidden');
+}
+
+function drawModalNestedDonutChart(canvasId, platformData, browserData) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    const centerX = canvas.width / 2;
+    const centerY = canvas.height / 2;
+    const scale = centerX / 90;
+    
+    const outerOuterRadius = 75 * scale;
+    const outerInnerRadius = 55 * scale;
+    const innerOuterRadius = 38 * scale;
+    const innerInnerRadius = 18 * scale;
+    
+    const rankColors = ['#FF6B6B', '#FFA726', '#FFD93D', '#6BCB77', '#4D96FF'];
+
+    let hoveredSlice = null;
+
+    function getMousePos(evt) {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        return {
+            x: (evt.clientX - rect.left) * scaleX,
+            y: (evt.clientY - rect.top) * scaleY
+        };
+    }
+
+    function isPointInArc(x, y, cx, cy, outerR, innerR, startAngle, endAngle) {
+        const dx = x - cx;
+        const dy = y - cy;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < innerR || dist > outerR) return false;
+        
+        let angle = Math.atan2(dy, dx);
+        if (angle < -Math.PI / 2) angle += 2 * Math.PI;
+        
+        let start = startAngle;
+        if (start < -Math.PI / 2) start += 2 * Math.PI;
+        let end = endAngle;
+        if (end < -Math.PI / 2) end += 2 * Math.PI;
+        
+        if (start <= end) {
+            return angle >= start && angle <= end;
+        } else {
+            return angle >= start || angle <= end;
+        }
+    }
+
+    function drawChart(hoveredItem = null) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        if (platformData && platformData.length > 0) {
+            const totalOuter = platformData.reduce((sum, item) => sum + item.count, 0);
+            let currentAngle = -Math.PI / 2;
+            
+            platformData.forEach((item, index) => {
+                const sliceAngle = (item.count / totalOuter) * 2 * Math.PI;
+                const color = index < rankColors.length ? rankColors[index] : '#4D96FF';
+                
+                let offsetX = 0, offsetY = 0;
+                if (hoveredItem && hoveredItem.type === 'platform' && hoveredItem.index === index) {
+                    const midAngle = currentAngle + sliceAngle / 2;
+                    offsetX = Math.cos(midAngle) * 5 * scale;
+                    offsetY = Math.sin(midAngle) * 5 * scale;
+                }
+                
+                ctx.beginPath();
+                ctx.arc(centerX + offsetX, centerY + offsetY, outerOuterRadius, currentAngle, currentAngle + sliceAngle);
+                ctx.arc(centerX + offsetX, centerY + offsetY, outerInnerRadius, currentAngle + sliceAngle, currentAngle, true);
+                ctx.closePath();
+                ctx.fillStyle = color;
+                ctx.fill();
+                
+                currentAngle += sliceAngle;
+            });
+        }
+        
+        if (browserData && browserData.length > 0) {
+            const totalInner = browserData.reduce((sum, item) => sum + item.count, 0);
+            let currentAngle = -Math.PI / 2;
+            
+            browserData.forEach((item, index) => {
+                const sliceAngle = (item.count / totalInner) * 2 * Math.PI;
+                const color = index < rankColors.length ? rankColors[index] : '#4D96FF';
+                
+                let offsetX = 0, offsetY = 0;
+                if (hoveredItem && hoveredItem.type === 'browser' && hoveredItem.index === index) {
+                    const midAngle = currentAngle + sliceAngle / 2;
+                    offsetX = Math.cos(midAngle) * 4 * scale;
+                    offsetY = Math.sin(midAngle) * 4 * scale;
+                }
+                
+                ctx.beginPath();
+                ctx.arc(centerX + offsetX, centerY + offsetY, innerOuterRadius, currentAngle, currentAngle + sliceAngle);
+                ctx.arc(centerX + offsetX, centerY + offsetY, innerInnerRadius, currentAngle + sliceAngle, currentAngle, true);
+                ctx.closePath();
+                ctx.fillStyle = color;
+                ctx.fill();
+                
+                currentAngle += sliceAngle;
+            });
+        }
+        
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, innerInnerRadius - 2, 0, 2 * Math.PI);
+        ctx.fillStyle = '#fff';
+        ctx.fill();
+    }
+
+    function showTooltip(e, data, percent) {
+        let tooltip = document.getElementById('chart-tooltip');
+        if (!tooltip) {
+            tooltip = document.createElement('div');
+            tooltip.id = 'chart-tooltip';
+            tooltip.style.cssText = `
+                position: fixed;
+                background: #fff;
+                color: #333;
+                padding: 8px 14px;
+                border-radius: 6px;
+                font-size: 13px;
+                pointer-events: none;
+                z-index: 10000;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            `;
+            document.body.appendChild(tooltip);
+        }
+        
+        tooltip.innerHTML = `<strong>${data.name}</strong><br>数量: ${data.count} (${percent}%)`;
+        tooltip.style.left = (e.clientX + 15) + 'px';
+        tooltip.style.top = (e.clientY - 10) + 'px';
+        tooltip.style.display = 'block';
+    }
+
+    function hideTooltip() {
+        const tooltip = document.getElementById('chart-tooltip');
+        if (tooltip) tooltip.style.display = 'none';
+    }
+
+    canvas.onmousemove = function(e) {
+        const pos = getMousePos(e);
+        
+        let found = null;
+        
+        if (platformData && platformData.length > 0) {
+            const totalOuter = platformData.reduce((sum, item) => sum + item.count, 0);
+            let currentAngle = -Math.PI / 2;
+            
+            for (let i = 0; i < platformData.length; i++) {
+                const sliceAngle = (platformData[i].count / totalOuter) * 2 * Math.PI;
+                const endAngle = currentAngle + sliceAngle;
+                
+                if (isPointInArc(pos.x, pos.y, centerX, centerY, outerOuterRadius, outerInnerRadius, currentAngle, endAngle)) {
+                    const percent = Math.round((platformData[i].count / totalOuter) * 100);
+                    found = { type: 'platform', index: i, data: platformData[i], percent };
+                    break;
+                }
+                currentAngle = endAngle;
+            }
+        }
+        
+        if (!found && browserData && browserData.length > 0) {
+            const totalInner = browserData.reduce((sum, item) => sum + item.count, 0);
+            let currentAngle = -Math.PI / 2;
+            
+            for (let i = 0; i < browserData.length; i++) {
+                const sliceAngle = (browserData[i].count / totalInner) * 2 * Math.PI;
+                const endAngle = currentAngle + sliceAngle;
+                
+                if (isPointInArc(pos.x, pos.y, centerX, centerY, innerOuterRadius, innerInnerRadius, currentAngle, endAngle)) {
+                    const percent = Math.round((browserData[i].count / totalInner) * 100);
+                    found = { type: 'browser', index: i, data: browserData[i], percent };
+                    break;
+                }
+                currentAngle = endAngle;
+            }
+        }
+        
+        if (found) {
+            canvas.style.cursor = 'pointer';
+            drawChart(found);
+            showTooltip(e, found.data, found.percent);
+            hoveredSlice = found;
+        } else {
+            canvas.style.cursor = 'default';
+            drawChart(null);
+            hideTooltip();
+            hoveredSlice = null;
+        }
+    };
+
+    canvas.onmouseleave = function() {
+        hideTooltip();
+        hoveredSlice = null;
+        drawChart(null);
+    };
+
+    canvas.onclick = function(e) {
+        if (hoveredSlice) {
+            showTooltip(e, hoveredSlice.data, hoveredSlice.percent);
+        }
+    };
+
+    drawChart();
+}
+
+function renderClientModalList() {
+    const rankColors = ['#FF6B6B', '#FFA726', '#FFD93D', '#6BCB77', '#4D96FF'];
+    const platforms = fullClientStats.platforms || [];
+    const browsers = fullClientStats.browsers || [];
+    
+    const platformsContainer = document.getElementById('clientModalPlatforms');
+    const browsersContainer = document.getElementById('clientModalBrowsers');
+    
+    // 渲染平台列表
+    platformsContainer.innerHTML = platforms.map((item, index) => {
+        const color = index < rankColors.length ? rankColors[index] : '#4D96FF';
+        return `
+            <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #f0f0f0;">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <div style="width: 10px; height: 10px; border-radius: 50%; background: ${color};"></div>
+                    <span style="color: var(--text-primary); font-size: 14px;">${item.name}</span>
+                </div>
+                <span style="color: #000; font-weight: 600; font-size: 14px;">${formatNumber(item.count)}</span>
+            </div>
+        `;
+    }).join('');
+    
+    // 渲染浏览器列表
+    browsersContainer.innerHTML = browsers.map((item, index) => {
+        const color = index < rankColors.length ? rankColors[index] : '#4D96FF';
+        return `
+            <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #f0f0f0;">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <div style="width: 10px; height: 10px; border-radius: 50%; background: ${color};"></div>
+                    <span style="color: var(--text-primary); font-size: 14px;">${item.name}</span>
+                </div>
+                <span style="color: #000; font-weight: 600; font-size: 14px;">${formatNumber(item.count)}</span>
+            </div>
+        `;
+    }).join('');
+}
+
 function renderQPSChart() {
     const chartContainer = document.getElementById('qps-chart');
     if (!chartContainer) {
         console.log('QPS图表容器不存在');
         return;
     }
-    
+
+    const rect = chartContainer.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+        console.log('QPS图表容器不可见，宽高:', rect.width, rect.height);
+        return;
+    }
+
     console.log('开始渲染QPS图表');
-    
+
     if (!qpsChart) {
+        // 先隐藏
+        chartContainer.style.opacity = '0';
+        chartContainer.style.visibility = 'hidden';
         qpsChart = echarts.init(chartContainer);
+        // 计算尺寸
+        qpsChart.resize();
+        // 显示回来
+        chartContainer.style.visibility = 'visible';
+        chartContainer.style.opacity = '1';
         window.addEventListener('resize', () => {
             if (qpsChart) {
                 qpsChart.resize();
             }
         });
+    } else {
+        // 先隐藏
+        chartContainer.style.opacity = '0';
+        chartContainer.style.visibility = 'hidden';
+        // 计算尺寸
+        qpsChart.resize();
+        // 显示回来
+        chartContainer.style.visibility = 'visible';
+        chartContainer.style.opacity = '1';
     }
-    
+
     const qpsHistory = historyData.qpsHistory || [];
     console.log('QPS历史数据长度:', qpsHistory.length);
     
@@ -2436,13 +3159,35 @@ function renderQPSChartMobile() {
     const chartContainer = document.getElementById('qps-chart-mobile');
     if (!chartContainer) return;
 
+    const rect = chartContainer.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+        return;
+    }
+
     if (!window.qpsChartMobile) {
+        // 先隐藏
+        chartContainer.style.opacity = '0';
+        chartContainer.style.visibility = 'hidden';
         window.qpsChartMobile = echarts.init(chartContainer);
+        // 计算尺寸
+        window.qpsChartMobile.resize();
+        // 显示回来
+        chartContainer.style.visibility = 'visible';
+        chartContainer.style.opacity = '1';
         window.addEventListener('resize', () => {
             if (window.qpsChartMobile) {
                 window.qpsChartMobile.resize();
             }
         });
+    } else {
+        // 先隐藏
+        chartContainer.style.opacity = '0';
+        chartContainer.style.visibility = 'hidden';
+        // 计算尺寸
+        window.qpsChartMobile.resize();
+        // 显示回来
+        chartContainer.style.visibility = 'visible';
+        chartContainer.style.opacity = '1';
     }
 
     const qpsHistory = historyData.qpsHistory || [];
@@ -2564,16 +3309,38 @@ function renderTrafficChart() {
     const outboundSpeedMobileEl = document.getElementById('outboundSpeed-mobile');
     if (inboundSpeedMobileEl) inboundSpeedMobileEl.textContent = formatSpeed(lastInbound);
     if (outboundSpeedMobileEl) outboundSpeedMobileEl.textContent = formatSpeed(lastOutbound);
-    
+
+    const rect = chartContainer.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+        return;
+    }
+
     if (!window.trafficChart) {
+        // 先隐藏
+        chartContainer.style.opacity = '0';
+        chartContainer.style.visibility = 'hidden';
         window.trafficChart = echarts.init(chartContainer);
+        // 计算尺寸
+        window.trafficChart.resize();
+        // 显示回来
+        chartContainer.style.visibility = 'visible';
+        chartContainer.style.opacity = '1';
         window.addEventListener('resize', () => {
             if (window.trafficChart) {
                 window.trafficChart.resize();
             }
         });
+    } else {
+        // 先隐藏
+        chartContainer.style.opacity = '0';
+        chartContainer.style.visibility = 'hidden';
+        // 计算尺寸
+        window.trafficChart.resize();
+        // 显示回来
+        chartContainer.style.visibility = 'visible';
+        chartContainer.style.opacity = '1';
     }
-    
+
     const maxBars = 35;
     const displayHistory = trafficHistory.slice(-maxBars);
     
@@ -2675,13 +3442,35 @@ function renderTrafficChartMobile() {
     const chartContainer = document.getElementById('traffic-chart-mobile');
     if (!chartContainer) return;
 
+    const rect = chartContainer.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+        return;
+    }
+
     if (!window.trafficChartMobile) {
+        // 先隐藏
+        chartContainer.style.opacity = '0';
+        chartContainer.style.visibility = 'hidden';
         window.trafficChartMobile = echarts.init(chartContainer);
+        // 计算尺寸
+        window.trafficChartMobile.resize();
+        // 显示回来
+        chartContainer.style.visibility = 'visible';
+        chartContainer.style.opacity = '1';
         window.addEventListener('resize', () => {
             if (window.trafficChartMobile) {
                 window.trafficChartMobile.resize();
             }
         });
+    } else {
+        // 先隐藏
+        chartContainer.style.opacity = '0';
+        chartContainer.style.visibility = 'hidden';
+        // 计算尺寸
+        window.trafficChartMobile.resize();
+        // 显示回来
+        chartContainer.style.visibility = 'visible';
+        chartContainer.style.opacity = '1';
     }
 
     const trafficHistory = historyData.trafficHistory || [];
@@ -2794,18 +3583,40 @@ function renderTrafficChartMobile() {
 function renderAttackChart() {
     const chartContainer = document.getElementById('attack-chart');
     if (!chartContainer) return;
-    
+
     const attackHistory = historyData.attackHistory || [];
-    
+
+    const rect = chartContainer.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+        return;
+    }
+
     if (!window.attackChart) {
+        // 先隐藏
+        chartContainer.style.opacity = '0';
+        chartContainer.style.visibility = 'hidden';
         window.attackChart = echarts.init(chartContainer);
+        // 计算尺寸
+        window.attackChart.resize();
+        // 显示回来
+        chartContainer.style.visibility = 'visible';
+        chartContainer.style.opacity = '1';
         window.addEventListener('resize', () => {
             if (window.attackChart) {
                 window.attackChart.resize();
             }
         });
+    } else {
+        // 先隐藏
+        chartContainer.style.opacity = '0';
+        chartContainer.style.visibility = 'hidden';
+        // 计算尺寸
+        window.attackChart.resize();
+        // 显示回来
+        chartContainer.style.visibility = 'visible';
+        chartContainer.style.opacity = '1';
     }
-    
+
     const maxBars = 35;
     const displayHistory = attackHistory.slice(-maxBars);
     
@@ -2883,13 +3694,35 @@ function renderAttackChartMobile() {
     const chartContainer = document.getElementById('attack-chart-mobile');
     if (!chartContainer) return;
 
+    const rect = chartContainer.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+        return;
+    }
+
     if (!window.attackChartMobile) {
+        // 先隐藏
+        chartContainer.style.opacity = '0';
+        chartContainer.style.visibility = 'hidden';
         window.attackChartMobile = echarts.init(chartContainer);
+        // 计算尺寸
+        window.attackChartMobile.resize();
+        // 显示回来
+        chartContainer.style.visibility = 'visible';
+        chartContainer.style.opacity = '1';
         window.addEventListener('resize', () => {
             if (window.attackChartMobile) {
                 window.attackChartMobile.resize();
             }
         });
+    } else {
+        // 先隐藏
+        chartContainer.style.opacity = '0';
+        chartContainer.style.visibility = 'hidden';
+        // 计算尺寸
+        window.attackChartMobile.resize();
+        // 显示回来
+        chartContainer.style.visibility = 'visible';
+        chartContainer.style.opacity = '1';
     }
 
     const attackHistory = historyData.attackHistory || [];
@@ -2973,21 +3806,23 @@ async function renderTrendChart() {
     const activeTab = document.querySelector('.trend-tab.active')?.dataset.tab || 'ip';
     const compareType = document.querySelector('input[name="compare"]:checked')?.value || 'prev-day';
 
-    if (!window.trendChart) {
-        window.trendChart = echarts.init(chartContainer);
-        window.addEventListener('resize', () => {
-            if (window.trendChart) {
-                window.trendChart.resize();
-            }
-        });
-    }
-
     try {
         const response = await fetch(`/api/trend-data?compare=${compareType}`);
         const result = await response.json();
         
         if (!result.success || !result.data) {
             throw new Error('获取趋势数据失败');
+        }
+
+        if (!window.trendChart) {
+            window.trendChart = echarts.init(chartContainer);
+            window.addEventListener('resize', () => {
+                if (window.trendChart) {
+                    window.trendChart.resize();
+                }
+            });
+        } else {
+            window.trendChart.resize();
         }
 
         const todayTrend = result.data.todayTrend || [];
@@ -3205,8 +4040,10 @@ function bindTrendEvents() {
         tab.addEventListener('click', () => {
             tabs.forEach(t => t.classList.remove('active'));
             tab.classList.add('active');
-            renderTrendChart();
-            renderTrendChartMobile();
+            requestAnimationFrame(() => {
+                renderTrendChart();
+                renderTrendChartMobile();
+            });
         });
     });
 
@@ -3226,12 +4063,29 @@ async function renderTrendChartMobile() {
     const compareType = document.querySelector('input[name="compare"]:checked')?.value || 'prev-day';
 
     if (!window.trendChartMobile) {
+        // 先隐藏
+        chartContainer.style.opacity = '0';
+        chartContainer.style.visibility = 'hidden';
         window.trendChartMobile = echarts.init(chartContainer);
+        // 计算尺寸
+        window.trendChartMobile.resize();
+        // 显示回来
+        chartContainer.style.visibility = 'visible';
+        chartContainer.style.opacity = '1';
         window.addEventListener('resize', () => {
             if (window.trendChartMobile) {
                 window.trendChartMobile.resize();
             }
         });
+    } else {
+        // 先隐藏
+        chartContainer.style.opacity = '0';
+        chartContainer.style.visibility = 'hidden';
+        // 计算尺寸
+        window.trendChartMobile.resize();
+        // 显示回来
+        chartContainer.style.visibility = 'visible';
+        chartContainer.style.opacity = '1';
     }
 
     try {

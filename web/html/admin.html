@@ -284,17 +284,21 @@
 
         .trend-header {
             display: flex;
+            flex-direction: row;
             align-items: center;
             gap: 16px;
             padding: 16px 20px;
             border-bottom: 1px solid var(--border-light);
+            overflow: hidden;
         }
 
         .trend-title {
-            font-size: 15px;
+            font-size: max(13px, min(1.3vw, 16px));
             font-weight: 600;
             color: var(--text-primary);
             margin: 0;
+            white-space: nowrap;
+            flex-shrink: 0;
         }
 
         .trend-tabs {
@@ -303,6 +307,8 @@
             background: rgba(0, 0, 0, 0.04);
             padding: 4px;
             border-radius: 6px;
+            flex-shrink: 0;
+            white-space: nowrap;
         }
 
         .trend-tab {
@@ -310,10 +316,11 @@
             border: none;
             background: transparent;
             border-radius: 4px;
-            font-size: 13px;
+            font-size: max(12px, min(1.1vw, 14px));
             color: var(--text-secondary);
             cursor: pointer;
             transition: all 0.2s;
+            white-space: nowrap;
         }
 
         .trend-tab:hover {
@@ -332,8 +339,10 @@
             display: flex;
             align-items: center;
             gap: 12px;
-            font-size: 13px;
+            font-size: max(12px, min(1.1vw, 14px));
             color: var(--text-muted);
+            white-space: nowrap;
+            flex-shrink: 0;
         }
 
         .compare-label {
@@ -341,6 +350,8 @@
             align-items: center;
             gap: 4px;
             cursor: pointer;
+            white-space: nowrap;
+            font-size: max(11px, min(1vw, 13px));
         }
 
         .compare-label input[type="radio"] {
@@ -386,7 +397,27 @@
             justify-content: space-between;
             align-items: center;
             padding: 8px 20px;
-            margin-bottom: 4px;
+            margin-bottom: 6px;
+            position: relative;
+            transition: background 0.2s;
+        }
+
+        .rank-list-bar {
+            position: absolute;
+            left: 0;
+            top: 0;
+            height: 100%;
+            background: rgba(239, 68, 68, 0.08);
+            z-index: 0;
+            border-radius: 4px;
+        }
+
+        .rank-list-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 20px;
+            margin-bottom: 6px;
             position: relative;
             transition: background 0.2s;
         }
@@ -397,27 +428,6 @@
 
         .rank-list-row:last-child {
             border-bottom: none;
-        }
-
-        .rank-list-bg {
-            position: absolute;
-            left: 0;
-            right: 0;
-            top: 0;
-            bottom: 0;
-            background: rgba(0, 0, 0, 0.015);
-            border-radius: 6px;
-            z-index: 0;
-        }
-
-        .rank-list-bar {
-            position: absolute;
-            left: 0;
-            top: 0;
-            bottom: 0;
-            background: rgba(0, 0, 0, 0.025);
-            border-radius: 6px;
-            z-index: 0;
         }
 
         .rank-list-name {
@@ -990,6 +1000,20 @@
             background: #c0392b;
         }
 
+        .btn-action {
+            background: var(--bg-light);
+            color: var(--text-secondary);
+            padding: 6px 12px;
+            font-size: 12px;
+            border: 1px solid var(--border-light);
+        }
+
+        .btn-action:hover {
+            background: var(--light-blue);
+            color: var(--primary-blue);
+            border-color: var(--primary-blue);
+        }
+
         .btn-edit {
             background: var(--primary-blue);
             color: white;
@@ -1079,6 +1103,38 @@
             padding: 24px;
             max-height: 60vh;
             overflow-y: auto;
+        }
+
+        .client-modal-chart {
+            display: none;
+        }
+
+        .client-modal-lists {
+            display: flex;
+            gap: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .client-modal-chart {
+                display: flex;
+                justify-content: center;
+                padding: 10px 0 20px 0;
+            }
+            .client-modal-lists {
+                flex-direction: column;
+            }
+            .client-detail-modal-body {
+                flex-direction: column !important;
+            }
+            .client-detail-modal-chart {
+                width: 100% !important;
+                justify-content: center !important;
+                padding: 10px 0;
+            }
+            .client-detail-modal-lists {
+                flex-direction: column !important;
+                width: 100% !important;
+            }
         }
 
         .modal-footer {
@@ -1444,14 +1500,18 @@
             #stats-tab {
                 min-width: unset !important;
                 width: 100%;
+                min-height: 100vh;
             }
 
             .mobile-stats-layout {
                 display: block;
                 width: 100%;
-                padding: 0;
-                min-height: calc(100vh - 100px);
+                padding: 0 0 80px 0;
+                min-height: 100vh;
                 box-sizing: border-box;
+                padding-bottom: max(80px, env(safe-area-inset-bottom));
+                overflow-y: auto;
+                -webkit-overflow-scrolling: touch;
             }
 
             .mobile-stats-group {
@@ -1481,6 +1541,7 @@
                 margin-bottom: 4px;
                 font-size: 12px;
                 position: relative;
+                z-index: 1;
             }
 
             .mobile-stats-group .rank-list-name {
@@ -1567,10 +1628,6 @@
                 display: none;
             }
 
-            .mobile-stats-layout {
-                display: block;
-            }
-
             .stats-scroll-wrapper {
                 width: 100%;
                 overflow-x: visible;
@@ -1621,6 +1678,13 @@
                 margin-bottom: 8px;
                 padding-bottom: 6px;
                 border-bottom: 1px solid var(--border-light);
+            }
+
+            .mobile-stats-group-header .rank-list-detail {
+                margin-left: auto;
+                font-size: 12px;
+                color: #1a73e8;
+                text-decoration: none;
             }
 
             .mobile-stats-group-icon {
@@ -2254,8 +2318,9 @@
                             </div>
                         </div>
                     </div>
-                    <div class="card trend-card-full">
-                        <div class="trend-header">
+                <div class="stats-grid">
+                    <div class="card trend-card-full" style="display: flex; flex-direction: column; margin-bottom: 0;">
+                        <div class="trend-header" style="padding: 4px 20px; flex-wrap: nowrap; flex-direction: row; flex-shrink: 0;">
                             <h3 class="trend-title">趋势变化</h3>
                             <div class="trend-tabs">
                                 <button class="trend-tab active" data-tab="ip">IP异常数量</button>
@@ -2273,13 +2338,21 @@
                                 </label>
                             </div>
                         </div>
-                        <div id="trend-chart" style="width: 100%; height: 200px;"></div>
+                        <div id="trend-chart" style="flex: 1; min-height: 0;"></div>
                     </div>
+                    <div class="card" style="display: flex; flex-direction: column; margin-bottom: 0;">
+                        <div class="rank-list-header" style="flex-direction: row; padding: 12px 20px;">
+                            <span class="rank-list-title">客户端</span>
+                            <a href="#" onclick="openClientModal(event)" class="rank-list-detail">详情</a>
+                        </div>
+                        <div id="clientStatsContainer" style="padding: 15px 15px 0 15px; flex: 1; display: flex; align-items: center;"></div>
+                    </div>
+                </div>
                     <div class="stats-grid">
                         <div class="card">
                             <div class="rank-list-header" style="flex-direction: row;">
                                 <span class="rank-list-title">攻击IP</span>
-                                <span class="rank-list-subtitle">今日TOP10</span>
+                                <span class="rank-list-subtitle">今日TOP5</span>
                                 <a href="#" onclick="switchTab('ip-logs')" class="rank-list-detail">详情</a>
                             </div>
                             <div class="rank-list-table">
@@ -2293,7 +2366,7 @@
                         <div class="card">
                             <div class="rank-list-header" style="flex-direction: row;">
                                 <span class="rank-list-title">最近攻击</span>
-                                <span class="rank-list-subtitle">最新10条</span>
+                                <span class="rank-list-subtitle">最新5条</span>
                                 <a href="#" onclick="switchTab('logs')" class="rank-list-detail">详情</a>
                             </div>
                             <div class="rank-list-table">
@@ -2528,11 +2601,22 @@
                         <div id="trend-chart-mobile" style="width: 100%; height: 200px;"></div>
                     </div>
 
+                    <!-- 客户端 -->
+                    <div class="mobile-stats-group">
+                        <div class="mobile-stats-group-header">
+                            <span class="mobile-stats-group-icon">💻</span>
+                            <span class="mobile-stats-group-title">客户端</span>
+                            <a href="#" onclick="openClientModal(event)" class="rank-list-detail">详情</a>
+                        </div>
+                        <div id="clientStatsContainer-mobile" style="padding: 10px;"></div>
+                    </div>
+
                     <!-- 攻击IP 今日TOP 10 -->
                     <div class="mobile-stats-group">
                         <div class="mobile-stats-group-header">
                             <span class="mobile-stats-group-icon">🏆</span>
-                            <span class="mobile-stats-group-title">攻击IP 今日TOP10</span>
+                            <span class="mobile-stats-group-title">攻击IP 今日TOP5</span>
+                            <a href="#" onclick="switchTab('ip-logs')" class="rank-list-detail">详情</a>
                         </div>
                         <div class="rank-list-table">
                             <div class="rank-list-head">
@@ -2547,7 +2631,8 @@
                     <div class="mobile-stats-group">
                         <div class="mobile-stats-group-header">
                             <span class="mobile-stats-group-icon">🕵️</span>
-                            <span class="mobile-stats-group-title">最近攻击</span>
+                            <span class="mobile-stats-group-title">最近攻击 TOP5</span>
+                            <a href="#" onclick="switchTab('logs')" class="rank-list-detail">详情</a>
                         </div>
                         <div class="rank-list-table">
                             <div class="rank-list-head">
@@ -2660,28 +2745,35 @@
             <div id="ip-logs-tab" class="tab-content">
                 <div class="card">
                     <div class="card-title-inline">
-                        <div class="mui-select-wrapper">
-                            <select id="ipLogModeFilter" onchange="resetIPAccessLogsPage()" class="mui-select">
-                                <option value="">所有模式</option>
-                                <option value="normal">正常模式</option>
-                                <option value="whitelist-only">白名单模式</option>
-                                <option value="blacklist-only">黑名单模式</option>
-                            </select>
-                            <div class="mui-select-icon">▼</div>
-                            <div class="mui-select-outline">
-                                <div class="mui-select-legend">模式</div>
+                        <div style="display: flex; gap: 12px;">
+                            <div class="mui-select-wrapper">
+                                <select id="ipLogModeFilter" onchange="resetIPAccessLogsPage()" class="mui-select">
+                                    <option value="">所有模式</option>
+                                    <option value="normal">正常模式</option>
+                                    <option value="whitelist-only">白名单模式</option>
+                                    <option value="blacklist-only">黑名单模式</option>
+                                </select>
+                                <div class="mui-select-icon">▼</div>
+                                <div class="mui-select-outline">
+                                    <div class="mui-select-legend">模式</div>
+                                </div>
                             </div>
-                        </div>
-                        <div class="mui-select-wrapper">
-                            <select id="ipLogResultFilter" onchange="resetIPAccessLogsPage()" class="mui-select">
-                                <option value="">所有结果</option>
-                                <option value="pass">通过</option>
-                                <option value="observe">观察</option>
-                                <option value="block">拦截</option>
-                            </select>
-                            <div class="mui-select-icon">▼</div>
-                            <div class="mui-select-outline">
-                                <div class="mui-select-legend">结果</div>
+                            <div class="mui-select-wrapper">
+                                <select id="ipLogResultFilter" onchange="resetIPAccessLogsPage()" class="mui-select">
+                                    <option value="">所有结果</option>
+                                    <option value="pass">通过</option>
+                                    <option value="observe">观察</option>
+                                    <option value="block">拦截</option>
+                                </select>
+                                <div class="mui-select-icon">▼</div>
+                                <div class="mui-select-outline">
+                                    <div class="mui-select-legend">结果</div>
+                                </div>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <input type="text" id="ipLogSearch" onkeyup="if(event.key==='Enter')resetIPAccessLogsPage()" placeholder="搜索关键字" style="padding: 6px 12px; border: 1px solid var(--border-light); border-radius: 6px; font-size: 14px; min-width: 150px;">
+                                <button class="btn btn-secondary" onclick="resetIPAccessLogsPage()" style="padding: 6px 12px;">🔍</button>
+                                <button class="btn btn-action" onclick="deleteIPAccessSearchResults()">🗑️ 删除搜索结果</button>
                             </div>
                         </div>
                         <button class="btn btn-delete" onclick="clearIPAccessLogs()">🗑️ 清空日志</button>
@@ -2734,18 +2826,25 @@
             <div id="logs-tab" class="tab-content">
                 <div class="card">
                     <div class="card-title-inline">
-                        <div class="mui-select-wrapper">
-                            <select id="logFilter" onchange="resetLogsPage()" class="mui-select">
-                                <option value="all">所有</option>
-                                <option value="normal">已放行(所有IP)</option>
-                                <option value="normal-green">已放行(合规IP)</option>
-                                <option value="normal-yellow">已放行(不合规IP)</option>
-                                <option value="detected">未拦截</option>
-                                <option value="blocked">已拦截</option>
-                            </select>
-                            <div class="mui-select-icon">▼</div>
-                            <div class="mui-select-outline">
-                                <div class="mui-select-legend">动作</div>
+                        <div style="display: flex; gap: 12px;">
+                            <div class="mui-select-wrapper">
+                                <select id="logFilter" onchange="resetLogsPage()" class="mui-select">
+                                    <option value="all">所有</option>
+                                    <option value="normal">已放行(所有IP)</option>
+                                    <option value="normal-green">已放行(合规IP)</option>
+                                    <option value="normal-yellow">已放行(不合规IP)</option>
+                                    <option value="detected">未拦截</option>
+                                    <option value="blocked">已拦截</option>
+                                </select>
+                                <div class="mui-select-icon">▼</div>
+                                <div class="mui-select-outline">
+                                    <div class="mui-select-legend">动作</div>
+                                </div>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <input type="text" id="logSearch" onkeyup="if(event.key==='Enter')resetLogsPage()" placeholder="搜索关键字" style="padding: 6px 12px; border: 1px solid var(--border-light); border-radius: 6px; font-size: 14px; min-width: 150px;">
+                                <button class="btn btn-secondary" onclick="resetLogsPage()" style="padding: 6px 12px;">🔍</button>
+                                <button class="btn btn-action" onclick="deleteSearchResults()">🗑️ 删除搜索结果</button>
                             </div>
                         </div>
                         <button class="btn btn-delete" onclick="clearLogs()">🗑️ 清空日志</button>
@@ -3102,6 +3201,35 @@
             <div class="modal-footer">
                 <button class="btn" onclick="closeIPBlacklistModal()">取消</button>
                 <button class="btn btn-primary" onclick="saveIPBlacklist()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="clientDetailModal" class="modal modal-hidden">
+        <div class="modal-content" style="max-width: 900px;">
+            <div class="modal-header">
+                <h3>客户端详情</h3>
+                <button class="modal-close" onclick="closeClientModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="client-detail-modal-body" style="display: flex; gap: 30px;">
+                    <div class="client-detail-modal-chart" style="width: 200px; display: flex; justify-content: center; align-items: center;">
+                        <canvas id="clientModalDonutChart" width="180" height="180"></canvas>
+                    </div>
+                    <div class="client-detail-modal-lists" style="flex: 1; display: flex; gap: 20px;">
+                        <div style="flex: 1;">
+                            <h4 style="margin-bottom: 12px; font-size: 14px; color: var(--text-primary);">平台分布</h4>
+                            <div id="clientModalPlatforms"></div>
+                        </div>
+                        <div style="flex: 1;">
+                            <h4 style="margin-bottom: 12px; font-size: 14px; color: var(--text-primary);">浏览器分布</h4>
+                            <div id="clientModalBrowsers"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="closeClientModal()">关闭</button>
             </div>
         </div>
     </div>

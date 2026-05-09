@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,8 +33,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.1"
-const localVersionInt = 4010// 版本整数值，用于对比
+const frontendVersion = "v0.4.2"
+const localVersionInt = 4020// 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
@@ -138,7 +139,7 @@ func getUTCTimestamp() int64 {
 	return time.Now().UTC().Unix()
 }
 
-const currentDBVersion = "1.1"
+const currentDBVersion = "1.2"
 
 func getCurrentDBVersion() string {
 	var version string
@@ -247,20 +248,28 @@ func upgradeDBFrom10To11() error {
 	log.Println("开始升级数据库从版本1.0到1.1...")
 	
 	go func() {
-		err := performUpgradeSteps()
+		err := performUpgradeSteps("1.1")
 		if err != nil {
 			setUpgradeError(err.Error())
 			log.Printf("数据库升级失败: %v", err)
 		} else {
-			setUpgradeCompleted()
-			log.Println("数据库升级完成，当前版本: 1.1")
+			// 1.0→1.1 完成后，继续升级到 1.2
+			log.Println("1.0→1.1 升级完成，继续升级到 1.2...")
+			err := upgradeDBFrom11To12InPlace()
+			if err != nil {
+				setUpgradeError(err.Error())
+				log.Printf("1.1→1.2 升级失败: %v", err)
+			} else {
+				setUpgradeCompleted()
+				log.Println("数据库升级完成，当前版本: 1.2")
+			}
 		}
 	}()
 	
 	return nil
 }
 
-func performUpgradeSteps() error {
+func performUpgradeSteps(targetVersion string) error {
 	updateUpgradeProgress("backingup", 0, 100, "正在备份数据库...")
 	log.Println("开始备份数据库...")
 	
@@ -417,7 +426,7 @@ func performUpgradeSteps() error {
 	
 	updateUpgradeProgress("completed", int(totalRecords), int(totalRecords), "升级完成")
 	
-	err = setDBVersion(currentDBVersion)
+	err = setDBVersion(targetVersion)
 	if err != nil {
 		return fmt.Errorf("更新数据库版本失败: %w", err)
 	}
@@ -444,6 +453,59 @@ func convertTimeStringToTimestamp(timeStr string) int64 {
 	// 如果都解析失败，返回当前时间戳
 	log.Printf("无法解析时间字符串: %s，使用当前时间", timeStr)
 	return getUTCTimestamp()
+}
+
+func upgradeDBFrom11To12() error {
+	initUpgradeProgress()
+	log.Println("开始升级数据库从版本1.1到1.2...")
+	
+	go func() {
+		err := upgradeDBFrom11To12InPlace()
+		if err != nil {
+			setUpgradeError(err.Error())
+			log.Printf("数据库升级失败: %v", err)
+		} else {
+			setUpgradeCompleted()
+			log.Println("数据库升级完成，当前版本: 1.2")
+		}
+	}()
+	
+	return nil
+}
+
+func upgradeDBFrom11To12InPlace() error {
+	log.Println("开始升级数据库从版本1.1到1.2...")
+	updateUpgradeProgress("upgrading", 0, 2, "添加 platform 字段...")
+	
+	_, err := db.Exec("ALTER TABLE attack_logs ADD COLUMN platform TEXT DEFAULT 'Unknown'")
+	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			log.Printf("添加platform字段失败: %v", err)
+			return err
+		}
+		log.Println("platform字段已存在，跳过")
+	}
+	
+	updateUpgradeProgress("upgrading", 1, 2, "添加 browser 字段...")
+	
+	_, err = db.Exec("ALTER TABLE attack_logs ADD COLUMN browser TEXT DEFAULT 'Unknown'")
+	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			log.Printf("添加browser字段失败: %v", err)
+			return err
+		}
+		log.Println("browser字段已存在，跳过")
+	}
+	
+	updateUpgradeProgress("finalizing", 2, 2, "更新数据库版本...")
+	
+	err = setDBVersion("1.2")
+	if err != nil {
+		return err
+	}
+	
+	log.Println("数据库升级完成，当前版本: 1.2")
+	return nil
 }
 
 type User struct {
@@ -506,6 +568,8 @@ type AttackLog struct {
 	Latitude   float64 `json:"latitude"`
 	Longitude  float64 `json:"longitude"`
 	FilterType string  `json:"filterType"`
+	Platform   string  `json:"platform"`
+	Browser    string  `json:"browser"`
 }
 
 type RuleInfo struct {
@@ -718,7 +782,9 @@ func initDB() error {
 		city TEXT,
 		latitude REAL,
 		longitude REAL,
-		filter_type TEXT
+		filter_type TEXT,
+		platform TEXT DEFAULT 'Unknown',
+		browser TEXT DEFAULT 'Unknown'
 	);
 
 	CREATE TABLE IF NOT EXISTS statistics (
@@ -2176,7 +2242,7 @@ func (wh *wafHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if tx.IsInterrupted() {
 			interruption := tx.Interruption()
 			log.Printf("WAF 拦截 %s %s - User-Agent: %s - 规则ID: %d, 动作: %s - 拦截原因: %s - 匹配规则: %s", r.Method, fullURL, userAgent, interruption.RuleID, interruption.Action, interruption.Data, rules)
-			saveAttackLog("blocked", fullURL, interruption.Data, r.RemoteAddr, rules, r.Method, wh.proxyID, 403, "")
+			saveAttackLog("blocked", fullURL, interruption.Data, r.RemoteAddr, rules, r.Method, wh.proxyID, 403, "", userAgent)
 			updateStats(r.RemoteAddr, 403, true)
 
 			country, province, city, _, _ := getGeoLocation(cleanIP)
@@ -2204,10 +2270,10 @@ func (wh *wafHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			
 			if only901340 {
 				log.Printf("WAF 正常通过 %s %s - User-Agent: %s - 匹配规则: 无", r.Method, fullURL, userAgent)
-				saveAttackLog("normal", fullURL, "正常请求", r.RemoteAddr, "无", r.Method, wh.proxyID, 200, ipCheckAction)
+				saveAttackLog("normal", fullURL, "正常请求", r.RemoteAddr, "无", r.Method, wh.proxyID, 200, ipCheckAction, userAgent)
 			} else {
 				log.Printf("WAF 未拦截通过 %s %s - User-Agent: %s - 匹配规则: %s", r.Method, fullURL, userAgent, rules)
-				saveAttackLog("detected", fullURL, "检测到攻击", r.RemoteAddr, rules, r.Method, wh.proxyID, 200, "")
+				saveAttackLog("detected", fullURL, "检测到攻击", r.RemoteAddr, rules, r.Method, wh.proxyID, 200, "", userAgent)
 				updateStats(r.RemoteAddr, 200, true)
 
 				country, province, city, _, _ := getGeoLocation(cleanIP)
@@ -2227,7 +2293,7 @@ func (wh *wafHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			log.Printf("WAF 正常通过 %s %s - User-Agent: %s - 匹配规则: 无", r.Method, fullURL, userAgent)
-			saveAttackLog("normal", fullURL, "正常请求", r.RemoteAddr, "无", r.Method, wh.proxyID, 200, ipCheckAction)
+			saveAttackLog("normal", fullURL, "正常请求", r.RemoteAddr, "无", r.Method, wh.proxyID, 200, ipCheckAction, userAgent)
 		}
 		tx.ProcessLogging()
 		tx.Close()
@@ -2354,13 +2420,14 @@ func logIPAccess(ip, mode, action, result, url string, forwardType, instanceName
 	}
 }
 
-func saveAttackLog(action, url, attackType, ip, rules, method, proxyID string, statusCode int, filterType string) {
+func saveAttackLog(action, url, attackType, ip, rules, method, proxyID string, statusCode int, filterType string, userAgent string) {
 	logsMutex.Lock()
 	defer logsMutex.Unlock()
 	
 	// 先清理 IP 地址，移除端口号
 	cleanIP := getCleanIP(ip)
 	country, province, city, latitude, longitude := getGeoLocation(cleanIP)
+	platform, browser := parseUserAgent(userAgent)
 	
 	logEntry := AttackLog{
 		ID:         fmt.Sprintf("%d", time.Now().UnixNano()),
@@ -2379,6 +2446,8 @@ func saveAttackLog(action, url, attackType, ip, rules, method, proxyID string, s
 		Latitude:   latitude,
 		Longitude:  longitude,
 		FilterType: filterType,
+		Platform:   platform,
+		Browser:    browser,
 	}
 	
 	attackLogs = append(attackLogs, logEntry)
@@ -2389,8 +2458,8 @@ func saveAttackLog(action, url, attackType, ip, rules, method, proxyID string, s
 
 	for i := 0; i < 5; i++ {
 		_, err := db.Exec(
-			"INSERT INTO attack_logs (id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			logEntry.ID, logEntry.Action, logEntry.URL, logEntry.AttackType, logEntry.IP, logEntry.Time, logEntry.Rules, logEntry.Method, logEntry.ProxyID, logEntry.StatusCode, logEntry.Country, logEntry.Province, logEntry.City, logEntry.Latitude, logEntry.Longitude, logEntry.FilterType,
+			"INSERT INTO attack_logs (id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type, platform, browser) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			logEntry.ID, logEntry.Action, logEntry.URL, logEntry.AttackType, logEntry.IP, logEntry.Time, logEntry.Rules, logEntry.Method, logEntry.ProxyID, logEntry.StatusCode, logEntry.Country, logEntry.Province, logEntry.City, logEntry.Latitude, logEntry.Longitude, logEntry.FilterType, logEntry.Platform, logEntry.Browser,
 		)
 		if err == nil {
 			return
@@ -2402,6 +2471,105 @@ func saveAttackLog(action, url, attackType, ip, rules, method, proxyID string, s
 		log.Printf("保存攻击日志到数据库失败: %v", err)
 		return
 	}
+}
+
+func parseUserAgent(userAgent string) (platform, browser string) {
+	platform = "Unknown"
+	browser = "Unknown"
+
+	ua := strings.ToLower(userAgent)
+
+	// 检测平台
+	if strings.Contains(ua, "windows") {
+		platform = "Windows"
+	} else if strings.Contains(ua, "macintosh") || strings.Contains(ua, "mac os") {
+		platform = "MacOS"
+	} else if strings.Contains(ua, "linux") && !strings.Contains(ua, "android") {
+		platform = "Linux"
+	} else if strings.Contains(ua, "android") {
+		platform = "Android"
+	} else if strings.Contains(ua, "iphone") || strings.Contains(ua, "ipad") || strings.Contains(ua, "ipod") {
+		platform = "iOS"
+	} else if strings.Contains(ua, "fedora") {
+		platform = "Fedora"
+	} else if strings.Contains(ua, "ubuntu") {
+		platform = "Ubuntu"
+	}
+
+	// 检测浏览器
+	if strings.Contains(ua, "firefox") && !strings.Contains(ua, "seamonkey") {
+		browser = "Firefox"
+	} else if strings.Contains(ua, "chrome") && !strings.Contains(ua, "chromium") && !strings.Contains(ua, "edge") && !strings.Contains(ua, "opr") {
+		if strings.Contains(ua, "chrome mobile") || strings.Contains(ua, "chrome mobile webview") {
+			browser = "Chrome Mobile"
+		} else {
+			browser = "Chrome"
+		}
+	} else if strings.Contains(ua, "safari") && !strings.Contains(ua, "chrome") && !strings.Contains(ua, "chromium") && !strings.Contains(ua, "android") && !strings.Contains(ua, "edge") && !strings.Contains(ua, "opr") {
+		if strings.Contains(ua, "mobile") {
+			browser = "Mobile Safari"
+		} else {
+			browser = "Safari"
+		}
+	} else if strings.Contains(ua, "edge") {
+		browser = "Edge"
+	} else if strings.Contains(ua, "opera") || strings.Contains(ua, "opr") {
+		browser = "Opera"
+	} else if strings.Contains(ua, "msie") || strings.Contains(ua, "trident") {
+		browser = "IE"
+	} else if strings.Contains(ua, "brave") {
+		browser = "Brave"
+	} else if strings.Contains(ua, "vivaldi") {
+		browser = "Vivaldi"
+	} else if strings.Contains(ua, "arora") {
+		browser = "Arora"
+	} else if strings.Contains(ua, "kazehakase") {
+		browser = "Kazehakase"
+	} else if strings.Contains(ua, "aol") {
+		browser = "AOL"
+	} else if strings.Contains(ua, "sogou") {
+		browser = "Sogou Explorer"
+	} else if strings.Contains(ua, "qqbrowser") {
+		browser = "QQ Browser"
+	} else if strings.Contains(ua, "go-http-client") {
+		browser = "Go-http-client"
+	} else if strings.Contains(ua, "curl") {
+		browser = "curl"
+	} else if strings.Contains(ua, "python-requests") {
+		browser = "python-requests"
+	} else if strings.Contains(ua, "sqlmap") {
+		browser = "sqlmap"
+	} else if strings.Contains(ua, "wget") {
+		browser = "Wget"
+	} else if strings.Contains(ua, "googlebot") {
+		browser = "Googlebot"
+	} else if strings.Contains(ua, "bingbot") {
+		browser = "bingbot"
+	} else if strings.Contains(ua, "mj12bot") {
+		browser = "MJ12bot"
+	} else if strings.Contains(ua, "oai-searchbot") {
+		browser = "OAI-SearchBot"
+	} else if strings.Contains(ua, "bytespider") {
+		browser = "Bytespider"
+	} else if strings.Contains(ua, "dotbot") {
+		browser = "DotBot"
+	} else if strings.Contains(ua, "thinkbot") {
+		browser = "ThinkBot"
+	} else if strings.Contains(ua, "facebookexternalhit") {
+		browser = "facebookexternalhit"
+	} else if strings.Contains(ua, "facebookbot") {
+		browser = "FacebookBot"
+	} else if strings.Contains(ua, "huawei") {
+		browser = "Huawei Browser"
+	} else if strings.Contains(ua, "apple mail") {
+		browser = "Apple Mail"
+	} else if strings.Contains(ua, "headless") {
+		browser = "HeadlessChrome"
+	} else if strings.Contains(ua, "mozilla") {
+		browser = "Mozilla"
+	}
+
+	return platform, browser
 }
 
 func render403Page(w http.ResponseWriter, interruption *types.Interruption, rules string) {
@@ -2848,7 +3016,26 @@ func handleDBUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	if version == "1.0" {
-		err := upgradeDBFrom10To11()
+		err := upgradeDBFrom10To11() // 这个函数内部会继续升级到 1.2
+		if err != nil {
+			log.Printf("数据库升级失败: %v", err)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   err.Error(),
+			})
+			return
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "数据库升级已开始",
+			"version": currentDBVersion,
+		})
+		return
+	}
+	
+	if version == "1.1" {
+		err := upgradeDBFrom11To12()
 		if err != nil {
 			log.Printf("数据库升级失败: %v", err)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3912,14 +4099,35 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if r.Method == "DELETE" {
-		var err error
+		search := r.URL.Query().Get("search")
 		logsMutex.Lock()
+		defer logsMutex.Unlock()
+
+		if search != "" {
+			searchPattern := "%" + search + "%"
+			result, err := db.Exec("DELETE FROM attack_logs WHERE url LIKE ? OR ip LIKE ? OR attack_type LIKE ? OR rules LIKE ? OR country LIKE ? OR province LIKE ? OR city LIKE ?", searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern)
+			if err != nil {
+				log.Printf("删除搜索结果失败: %v", err)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"error":   "删除日志失败",
+				})
+				return
+			}
+			affected, _ := result.RowsAffected()
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"deleted": affected,
+			})
+			return
+		}
+
 		attackLogs = []AttackLog{}
 
 		db.SetMaxOpenConns(1)
 		db.SetMaxIdleConns(1)
 
-		_, err = db.Exec("DELETE FROM attack_logs")
+		_, err := db.Exec("DELETE FROM attack_logs")
 		if err != nil {
 			log.Printf("清空攻击日志失败: %v", err)
 		}
@@ -3942,8 +4150,6 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 			log.Printf("重新连接数据库失败: %v", err)
 		}
 
-		logsMutex.Unlock()
-
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 		})
@@ -3953,6 +4159,7 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 	filter := r.URL.Query().Get("filter")
 	pageStr := r.URL.Query().Get("page")
 	pageSizeStr := r.URL.Query().Get("pageSize")
+	search := r.URL.Query().Get("search")
 	
 	page := 1
 	pageSize := 20
@@ -3970,32 +4177,62 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	offset := (page - 1) * pageSize
-	
+
 	var countQuery string
 	var dataQuery string
 	var args []interface{}
-	
+
+	searchClause := ""
+	searchPattern := ""
+	if search != "" {
+		searchPattern = "%" + search + "%"
+		searchClause = " AND (url LIKE ? OR ip LIKE ? OR attack_type LIKE ? OR rules LIKE ? OR country LIKE ? OR province LIKE ? OR city LIKE ?)"
+	}
+
 	if filter == "normal" {
-		countQuery = "SELECT COUNT(*) FROM attack_logs WHERE action = 'normal'"
-		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs WHERE action = 'normal' ORDER BY time DESC LIMIT ? OFFSET ?"
+		countQuery = "SELECT COUNT(*) FROM attack_logs WHERE action = 'normal'" + searchClause
+		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs WHERE action = 'normal'" + searchClause + " ORDER BY time DESC LIMIT ? OFFSET ?"
+		if search != "" {
+			args = append(args, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern)
+		}
 	} else if filter == "normal-green" {
-		countQuery = "SELECT COUNT(*) FROM attack_logs WHERE action = 'normal' AND filter_type IN ('whitelist_match', 'blacklist_no_match', 'whitelist_empty', 'blacklist_empty', 'normal')"
-		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs WHERE action = 'normal' AND filter_type IN ('whitelist_match', 'blacklist_no_match', 'whitelist_empty', 'blacklist_empty', 'normal') ORDER BY time DESC LIMIT ? OFFSET ?"
+		countQuery = "SELECT COUNT(*) FROM attack_logs WHERE action = 'normal' AND filter_type IN ('whitelist_match', 'blacklist_no_match', 'whitelist_empty', 'blacklist_empty', 'normal')" + searchClause
+		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs WHERE action = 'normal' AND filter_type IN ('whitelist_match', 'blacklist_no_match', 'whitelist_empty', 'blacklist_empty', 'normal')" + searchClause + " ORDER BY time DESC LIMIT ? OFFSET ?"
+		if search != "" {
+			args = append(args, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern)
+		}
 	} else if filter == "normal-yellow" {
-		countQuery = "SELECT COUNT(*) FROM attack_logs WHERE action = 'normal' AND filter_type IN ('whitelist_no_match', 'blacklist_match')"
-		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs WHERE action = 'normal' AND filter_type IN ('whitelist_no_match', 'blacklist_match') ORDER BY time DESC LIMIT ? OFFSET ?"
+		countQuery = "SELECT COUNT(*) FROM attack_logs WHERE action = 'normal' AND filter_type IN ('whitelist_no_match', 'blacklist_match')" + searchClause
+		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs WHERE action = 'normal' AND filter_type IN ('whitelist_no_match', 'blacklist_match')" + searchClause + " ORDER BY time DESC LIMIT ? OFFSET ?"
+		if search != "" {
+			args = append(args, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern)
+		}
 	} else if filter == "detected" {
-		countQuery = "SELECT COUNT(*) FROM attack_logs WHERE action = 'detected'"
-		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs WHERE action = 'detected' ORDER BY time DESC LIMIT ? OFFSET ?"
+		countQuery = "SELECT COUNT(*) FROM attack_logs WHERE action = 'detected'" + searchClause
+		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs WHERE action = 'detected'" + searchClause + " ORDER BY time DESC LIMIT ? OFFSET ?"
+		if search != "" {
+			args = append(args, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern)
+		}
 	} else if filter == "blocked" {
-		countQuery = "SELECT COUNT(*) FROM attack_logs WHERE action = 'blocked'"
-		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs WHERE action = 'blocked' ORDER BY time DESC LIMIT ? OFFSET ?"
+		countQuery = "SELECT COUNT(*) FROM attack_logs WHERE action = 'blocked'" + searchClause
+		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs WHERE action = 'blocked'" + searchClause + " ORDER BY time DESC LIMIT ? OFFSET ?"
+		if search != "" {
+			args = append(args, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern)
+		}
 	} else if filter == "attack" {
-		countQuery = "SELECT COUNT(*) FROM attack_logs WHERE action != 'normal'"
-		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs WHERE action != 'normal' ORDER BY time DESC LIMIT ? OFFSET ?"
+		countQuery = "SELECT COUNT(*) FROM attack_logs WHERE action != 'normal'" + searchClause
+		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs WHERE action != 'normal'" + searchClause + " ORDER BY time DESC LIMIT ? OFFSET ?"
+		if search != "" {
+			args = append(args, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern)
+		}
 	} else {
-		countQuery = "SELECT COUNT(*) FROM attack_logs"
-		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs ORDER BY time DESC LIMIT ? OFFSET ?"
+		var whereClause string
+		if search != "" {
+			whereClause = " WHERE (url LIKE ? OR ip LIKE ? OR attack_type LIKE ? OR rules LIKE ? OR country LIKE ? OR province LIKE ? OR city LIKE ?)"
+			args = append(args, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern)
+		}
+		countQuery = "SELECT COUNT(*) FROM attack_logs" + whereClause
+		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs" + whereClause + " ORDER BY time DESC LIMIT ? OFFSET ?"
 	}
 	
 	var total int
@@ -4008,7 +4245,7 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	
+
 	args = append(args, pageSize, offset)
 	rows, err := db.Query(dataQuery, args...)
 	if err != nil {
@@ -4244,6 +4481,81 @@ func handleStatisticsHistory(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type TopStatsItem struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
+func handleClientStats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	// 获取limit参数，默认5
+	limit := 5
+	if limitParam := r.URL.Query().Get("limit"); limitParam != "" {
+		if parsedLimit, err := strconv.Atoi(limitParam); err == nil {
+			limit = parsedLimit
+		}
+	}
+	
+	platformStats := make(map[string]int)
+	browserStats := make(map[string]int)
+	
+	rows, err := db.Query("SELECT platform, browser FROM attack_logs WHERE platform IS NOT NULL AND browser IS NOT NULL")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "查询客户端统计失败",
+		})
+		return
+	}
+	defer rows.Close()
+	
+	for rows.Next() {
+		var platform, browser string
+		rows.Scan(&platform, &browser)
+		
+		if platform != "" && platform != "Unknown" {
+			platformStats[platform]++
+		}
+		if browser != "" && browser != "Unknown" {
+			browserStats[browser]++
+		}
+	}
+	
+	platformList := make([]TopStatsItem, 0, len(platformStats))
+	for name, count := range platformStats {
+		platformList = append(platformList, TopStatsItem{Name: name, Count: count})
+	}
+	
+	sort.Slice(platformList, func(i, j int) bool {
+		return platformList[i].Count > platformList[j].Count
+	})
+	
+	if limit > 0 && len(platformList) > limit {
+		platformList = platformList[:limit]
+	}
+	
+	browserList := make([]TopStatsItem, 0, len(browserStats))
+	for name, count := range browserStats {
+		browserList = append(browserList, TopStatsItem{Name: name, Count: count})
+	}
+	
+	sort.Slice(browserList, func(i, j int) bool {
+		return browserList[i].Count > browserList[j].Count
+	})
+	
+	if limit > 0 && len(browserList) > limit {
+		browserList = browserList[:limit]
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"platforms": platformList,
+		"browsers": browserList,
+	})
+}
+
 type IPWhitelistEntry struct {
 	ID          int    `json:"id"`
 	IP          string `json:"ip"`
@@ -4438,6 +4750,7 @@ func handleIPAccessLogs(w http.ResponseWriter, r *http.Request) {
 		modeFilter := r.URL.Query().Get("mode")
 		resultFilter := r.URL.Query().Get("result")
 		ipFilter := r.URL.Query().Get("ip")
+		search := r.URL.Query().Get("search")
 		
 		pageNum := 1
 		pageSizeNum := 20
@@ -4483,7 +4796,17 @@ func handleIPAccessLogs(w http.ResponseWriter, r *http.Request) {
 			}
 			args = append(args, ipFilter)
 		}
-		
+
+		if search != "" {
+			if whereClause != "" {
+				whereClause += " AND (url LIKE ? OR ip LIKE ? OR country LIKE ? OR province LIKE ? OR city LIKE ? OR instance_name LIKE ?)"
+			} else {
+				whereClause = " WHERE (url LIKE ? OR ip LIKE ? OR country LIKE ? OR province LIKE ? OR city LIKE ? OR instance_name LIKE ?)"
+			}
+			searchPattern := "%" + search + "%"
+			args = append(args, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern)
+		}
+
 		countQuery := "SELECT COUNT(*) FROM ip_access_logs" + whereClause
 		var total int
 		err := db.QueryRow(countQuery, args...).Scan(&total)
@@ -4582,13 +4905,33 @@ func handleIPAccessLogs(w http.ResponseWriter, r *http.Request) {
 			"pageSize": pageSizeNum,
 		})
 	} else if r.Method == "DELETE" {
-		var err error
+		search := r.URL.Query().Get("search")
 		logsMutex.Lock()
+		defer logsMutex.Unlock()
+
+		if search != "" {
+			searchPattern := "%" + search + "%"
+			result, err := db.Exec("DELETE FROM ip_access_logs WHERE url LIKE ? OR ip LIKE ? OR country LIKE ? OR province LIKE ? OR city LIKE ? OR instance_name LIKE ?", searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern)
+			if err != nil {
+				log.Printf("删除IP访问日志搜索结果失败: %v", err)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"error":   "删除日志失败",
+				})
+				return
+			}
+			affected, _ := result.RowsAffected()
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"deleted": affected,
+			})
+			return
+		}
 
 		db.SetMaxOpenConns(1)
 		db.SetMaxIdleConns(1)
 
-		_, err = db.Exec("DELETE FROM ip_access_logs")
+		_, err := db.Exec("DELETE FROM ip_access_logs")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -4615,8 +4958,6 @@ func handleIPAccessLogs(w http.ResponseWriter, r *http.Request) {
 		if err := initDB(); err != nil {
 			log.Printf("重新连接数据库失败: %v", err)
 		}
-
-		logsMutex.Unlock()
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
@@ -4671,7 +5012,7 @@ func handleIPAccessLogsReport(w http.ResponseWriter, r *http.Request) {
 			COALESCE(SUM(CASE WHEN result = 'observe' THEN 1 ELSE 0 END), 0) as observe_traffic,
 			COALESCE(COUNT(DISTINCT CASE WHEN result != 'pass' THEN ip END), 0) as abnormal_ips
 		FROM ip_access_logs 
-		WHERE DATE(created_at, 'unixepoch') >= ? AND DATE(created_at, 'unixepoch') <= ?
+		WHERE DATE(datetime(created_at, 'unixepoch', '+8 hours')) >= ? AND DATE(datetime(created_at, 'unixepoch', '+8 hours')) <= ?
 	`, startDate, endDate).Scan(&normalTraffic, &attackTraffic, &observeTraffic, &abnormalIPs)
 
 	if err != nil {
@@ -4682,12 +5023,12 @@ func handleIPAccessLogsReport(w http.ResponseWriter, r *http.Request) {
 
 	dailyRows, err := db.Query(`
 		SELECT 
-			DATE(created_at, 'unixepoch') as date,
+			DATE(datetime(created_at, 'unixepoch', '+8 hours')) as date,
 			COALESCE(SUM(CASE WHEN result = 'pass' THEN 1 ELSE 0 END), 0) as normal,
 			COALESCE(SUM(CASE WHEN result = 'block' THEN 1 ELSE 0 END), 0) as attack
 		FROM ip_access_logs 
-		WHERE DATE(created_at, 'unixepoch') >= ? AND DATE(created_at, 'unixepoch') <= ?
-		GROUP BY DATE(created_at, 'unixepoch')
+		WHERE DATE(datetime(created_at, 'unixepoch', '+8 hours')) >= ? AND DATE(datetime(created_at, 'unixepoch', '+8 hours')) <= ?
+		GROUP BY DATE(datetime(created_at, 'unixepoch', '+8 hours'))
 		ORDER BY date
 	`, startDate, endDate)
 	
@@ -4706,7 +5047,7 @@ func handleIPAccessLogsReport(w http.ResponseWriter, r *http.Request) {
 			COALESCE(action, 'unknown') as type,
 			COUNT(*) as count
 		FROM ip_access_logs 
-		WHERE DATE(created_at, 'unixepoch') >= ? AND DATE(created_at, 'unixepoch') <= ? AND result = 'block'
+		WHERE DATE(datetime(created_at, 'unixepoch', '+8 hours')) >= ? AND DATE(datetime(created_at, 'unixepoch', '+8 hours')) <= ? AND result = 'block'
 		GROUP BY action
 		ORDER BY count DESC
 		LIMIT 10
@@ -4727,7 +5068,7 @@ func handleIPAccessLogsReport(w http.ResponseWriter, r *http.Request) {
 			COALESCE(country, '未知') || ' ' || COALESCE(province, '') || ' ' || COALESCE(city, '') as location,
 			COUNT(*) as count
 		FROM ip_access_logs 
-		WHERE DATE(created_at, 'unixepoch') >= ? AND DATE(created_at, 'unixepoch') <= ?
+		WHERE DATE(datetime(created_at, 'unixepoch', '+8 hours')) >= ? AND DATE(datetime(created_at, 'unixepoch', '+8 hours')) <= ?
 		GROUP BY country, province, city
 		ORDER BY count DESC
 		LIMIT 10
@@ -4746,10 +5087,10 @@ func handleIPAccessLogsReport(w http.ResponseWriter, r *http.Request) {
 
 	hourlyRows, err := db.Query(`
 		SELECT 
-			CAST(strftime('%H', created_at, 'unixepoch') AS INTEGER) as hour,
+			CAST(strftime('%H', datetime(created_at, 'unixepoch', '+8 hours')) AS INTEGER) as hour,
 			COUNT(*) as count
 		FROM ip_access_logs 
-		WHERE DATE(created_at, 'unixepoch') >= ? AND DATE(created_at, 'unixepoch') <= ?
+		WHERE DATE(datetime(created_at, 'unixepoch', '+8 hours')) >= ? AND DATE(datetime(created_at, 'unixepoch', '+8 hours')) <= ?
 		GROUP BY hour
 		ORDER BY hour
 	`, startDate, endDate)
@@ -4771,7 +5112,7 @@ func handleIPAccessLogsReport(w http.ResponseWriter, r *http.Request) {
 	topAttackIPRows, err := db.Query(`
 		SELECT ip, COUNT(*) as count
 		FROM ip_access_logs
-		WHERE DATE(created_at, 'unixepoch') >= ? AND DATE(created_at, 'unixepoch') <= ? AND result IN ('block', 'observe')
+		WHERE DATE(datetime(created_at, 'unixepoch', '+8 hours')) >= ? AND DATE(datetime(created_at, 'unixepoch', '+8 hours')) <= ? AND result IN ('block', 'observe')
 		GROUP BY ip
 		ORDER BY count DESC
 		LIMIT 10
@@ -4790,7 +5131,7 @@ func handleIPAccessLogsReport(w http.ResponseWriter, r *http.Request) {
 	topAbnormalIPRows, err := db.Query(`
 		SELECT ip, COUNT(*) as count
 		FROM ip_access_logs 
-		WHERE DATE(created_at, 'unixepoch') >= ? AND DATE(created_at, 'unixepoch') <= ? AND result != 'pass'
+		WHERE DATE(datetime(created_at, 'unixepoch', '+8 hours')) >= ? AND DATE(datetime(created_at, 'unixepoch', '+8 hours')) <= ? AND result != 'pass'
 		GROUP BY ip
 		ORDER BY count DESC
 		LIMIT 10
@@ -5997,6 +6338,7 @@ func main() {
 	mux.HandleFunc("/api/ip-access-logs", handleIPAccessLogs)
 	mux.HandleFunc("/api/ip-access-logs/report", handleIPAccessLogsReport)
 	mux.HandleFunc("/api/trend-data", handleTrendData)
+	mux.HandleFunc("/api/client-stats", handleClientStats)
 	mux.HandleFunc("/api/rir-import", readOnlyMiddleware(handleRIRImport))
 	mux.HandleFunc("/api/rir-import-progress", handleRIRImportProgress)
 	mux.HandleFunc("/api/system-settings", func(w http.ResponseWriter, r *http.Request) {
