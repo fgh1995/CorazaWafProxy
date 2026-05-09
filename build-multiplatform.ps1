@@ -1,8 +1,20 @@
 $ErrorActionPreference = "Stop"
 
-$ProjectRoot = "e:\Development\Src\Go\CorazaWafProxy\CorazaWafProxy"
+# 获取当前目录作为项目根目录
+$ProjectRoot = $PWD.Path
 $OutputDir = "$ProjectRoot\build"
-Set-Location $ProjectRoot
+
+# 从 main.go 中读取版本号
+$VersionSuffix = ""
+$MainGoPath = "$ProjectRoot\main.go"
+if (Test-Path $MainGoPath) {
+    $MainGoContent = Get-Content $MainGoPath -Raw
+    $VersionMatch = [regex]::Match($MainGoContent, 'const\s+frontendVersion\s*=\s*"([^"]+)"')
+    if ($VersionMatch.Success) {
+        $VersionSuffix = "-$($VersionMatch.Groups[1].Value)"
+        Write-Host "检测到版本号: $($VersionMatch.Groups[1].Value)" -ForegroundColor Cyan
+    }
+}
 
 $Platforms = @(
     @{GOOS="linux"; GOARCH="arm64"; Folder="linux-arm64"; Ext=""},
@@ -18,7 +30,7 @@ New-Item $OutputDir -ItemType Directory | Out-Null
 
 $Resources = @("config", "coreruleset", "static", "web", "install.sh")
 
-Write-Host "开始编译多平台版本..." -ForegroundColor Cyan
+Write-Host "开始构建多平台版本..." -ForegroundColor Cyan
 
 foreach ($Platform in $Platforms) {
     $GOOS = $Platform.GOOS
@@ -27,7 +39,7 @@ foreach ($Platform in $Platforms) {
     $Ext = $Platform.Ext
     $BinaryName = "coraza-waf-proxy-$Folder$Ext"
 
-    Write-Host "`n========== 编译 $Folder ==========" -ForegroundColor Yellow
+    Write-Host "`n========== 构建 $Folder ==========" -ForegroundColor Yellow
 
     $Env:GOOS = $GOOS
     $Env:GOARCH = $GOARCH
@@ -36,7 +48,7 @@ foreach ($Platform in $Platforms) {
     go build -o "$OutputDir\$Folder\$BinaryName" .
 
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "编译 $Folder 失败!" -ForegroundColor Red
+        Write-Host "构建 $Folder 失败!" -ForegroundColor Red
         exit 1
     }
 
@@ -62,22 +74,37 @@ foreach ($Platform in $Platforms) {
         }
     }
 
-    Write-Host "$Folder 编译完成!" -ForegroundColor Green
+    Write-Host "$Folder 构建完成!" -ForegroundColor Green
 }
 
 $Env:GOOS = $null
 $Env:GOARCH = $null
 
+# 打包为 zip
 Write-Host "`n========================================" -ForegroundColor Cyan
-Write-Host "所有平台编译完成!" -ForegroundColor Cyan
+Write-Host "开始打包为 zip..." -ForegroundColor Cyan
+
+foreach ($Platform in $Platforms) {
+    $Folder = $Platform.Folder
+    $ZipName = "coraza-waf-proxy-$Folder$VersionSuffix.zip"
+    $ZipPath = "$OutputDir\$ZipName"
+    $SourcePath = "$OutputDir\$Folder"
+
+    Write-Host "  打包 $Folder -> $ZipName..."
+    Compress-Archive -Path "$SourcePath\*" -DestinationPath $ZipPath -Force
+    Write-Host "  完成!" -ForegroundColor Green
+}
+
+Write-Host "`n========================================" -ForegroundColor Cyan
+Write-Host "多平台构建和打包完成!" -ForegroundColor Cyan
 Write-Host ""
 
 foreach ($Platform in $Platforms) {
     $Folder = $Platform.Folder
-    $BinaryName = "coraza-waf-proxy-$Folder$($Platform.Ext)"
-    $BinaryPath = "$OutputDir\$Folder\$BinaryName"
-    if (Test-Path $BinaryPath) {
-        $Size = (Get-Item $BinaryPath).Length / 1MB
-        Write-Host "  $Folder : $BinaryName ($([math]::Round($Size, 2)) MB)"
+    $ZipName = "coraza-waf-proxy-$Folder$VersionSuffix.zip"
+    $ZipPath = "$OutputDir\$ZipName"
+    if (Test-Path $ZipPath) {
+        $Size = (Get-Item $ZipPath).Length / 1MB
+        Write-Host "  $ZipName ($([math]::Round($Size, 2)) MB)"
     }
 }

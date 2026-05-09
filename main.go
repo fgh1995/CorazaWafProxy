@@ -2712,30 +2712,36 @@ func handleAbout(w http.ResponseWriter, r *http.Request) {
 		Timeout: 30 * time.Second,
 	}
 
-	// 获取远程版本信息
+	// 获取远程版本信息（从 main.go 中提取）
 	var remoteVersionInt int
 	var remoteVersionTxt string
 	var hasNewVersion bool
 
-	versionResp, err := client.Get("https://raw.giteeusercontent.com/fangguihua1995/CorazaWafProxy/raw/main/version")
+	versionResp, err := client.Get("https://raw.giteeusercontent.com/fangguihua1995/CorazaWafProxy/raw/main/main.go")
 	if err == nil {
 		defer versionResp.Body.Close()
 		versionContent, _ := io.ReadAll(versionResp.Body)
-		lines := strings.Split(string(versionContent), "\n")
-		for _, line := range lines {
-			if strings.HasPrefix(line, "int:") {
-				fmt.Sscanf(line, "int:%d", &remoteVersionInt)
-			} else if strings.HasPrefix(line, "txt:") {
-				remoteVersionTxt = strings.TrimPrefix(line, "txt:")
-			}
+		contentStr := string(versionContent)
+		
+		// 提取 localVersionInt
+		intMatch := regexp.MustCompile(`localVersionInt\s*=\s*(\d+)`).FindStringSubmatch(contentStr)
+		if len(intMatch) == 2 {
+			fmt.Sscanf(intMatch[1], "%d", &remoteVersionInt)
 		}
+		
+		// 提取 frontendVersion
+		txtMatch := regexp.MustCompile(`frontendVersion\s*=\s*"([^"]+)"`).FindStringSubmatch(contentStr)
+		if len(txtMatch) == 2 {
+			remoteVersionTxt = txtMatch[1]
+		}
+		
 		if remoteVersionInt > localVersionInt {
 			hasNewVersion = true
 		}
 	}
 
 	// 获取关于页面内容
-	resp, err := client.Get("https://raw.giteeusercontent.com/fangguihua1995/CorazaWafProxy/raw/main/about.html")
+	resp, err := client.Get("https://raw.giteeusercontent.com/fangguihua1995/fghcorazawaf/raw/master/aboutwaf.html")
 	if err != nil {
 		log.Printf("获取关于页面失败: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
