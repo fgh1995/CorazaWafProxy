@@ -32,8 +32,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.03"
-const localVersionInt = 4003// 版本整数值，用于对比
+const frontendVersion = "v0.4.1"
+const localVersionInt = 4010// 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
@@ -6008,6 +6008,7 @@ func main() {
 	})
 
 	mux.HandleFunc("/api/webhook-settings", readOnlyMiddleware(handleWebhookSettings))
+	mux.HandleFunc("/api/defense-test", readOnlyMiddleware(handleDefenseTest))
 	
 	mux.HandleFunc("/web/html/admin.html", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		content, err := os.ReadFile("web/html/admin.html")
@@ -6026,6 +6027,9 @@ func main() {
 	}))
 	mux.HandleFunc("/web/html/dashboard.html", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "web/html/dashboard.html")
+	}))
+	mux.HandleFunc("/web/html/defense-test.html", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "web/html/defense-test.html")
 	}))
 	mux.HandleFunc("/web/html/login.html", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "web/html/login.html")
@@ -6209,10 +6213,10 @@ func handleIPLocation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	country, province, city, latitude, longitude := getGeoLocation(cleanIP)
-	
-	log.Printf("查询结果 - 国家: %s, 省份: %s, 城市: %s, 纬度: %f, 经度: %f", 
+
+	log.Printf("查询结果 - 国家: %s, 省份: %s, 城市: %s, 纬度: %f, 经度: %f",
 		country, province, city, latitude, longitude)
-	
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":   true,
 		"latitude":  latitude,
@@ -6221,4 +6225,130 @@ func handleIPLocation(w http.ResponseWriter, r *http.Request) {
 		"province":  province,
 		"city":      city,
 	})
+}
+
+type DefenseTestRequest struct {
+	URL      string `json:"url"`
+	Type     string `json:"type"`
+	Payload  string `json:"payload"`
+}
+
+type DefenseTestResult struct {
+	Success    bool   `json:"success"`
+	Blocked    bool   `json:"blocked"`
+	StatusCode int    `json:"statusCode"`
+	Message    string `json:"message"`
+	Duration   int64  `json:"duration"`
+}
+
+func handleDefenseTest(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method == "POST" {
+		var req DefenseTestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			json.NewEncoder(w).Encode(DefenseTestResult{
+				Success: false,
+				Message: "无效的请求格式",
+			})
+			return
+		}
+
+		if req.URL == "" {
+			json.NewEncoder(w).Encode(DefenseTestResult{
+				Success: false,
+				Message: "目标URL不能为空",
+			})
+			return
+		}
+
+		startTime := time.Now()
+
+		targetURL, err := url.Parse(req.URL)
+		if err != nil || (targetURL.Scheme != "http" && targetURL.Scheme != "https") {
+			json.NewEncoder(w).Encode(DefenseTestResult{
+				Success: false,
+				Message: "无效的URL格式",
+			})
+			return
+		}
+
+		var reqPayload *http.Request
+		switch req.Type {
+		case "SQLI", "XSS", "RCE", "LFI", "RFI":
+			encodedPayload := url.QueryEscape(req.Payload)
+			testURL := req.URL
+			if strings.Contains(testURL, "?") {
+				testURL = testURL + "&q=" + encodedPayload
+			} else {
+				testURL = testURL + "?q=" + encodedPayload
+			}
+			reqPayload, _ = http.NewRequest("GET", testURL, nil)
+			reqPayload.Header.Set("User-Agent", "DefenseTest/1.0")
+		case "Scanner":
+			reqPayload, _ = http.NewRequest("GET", req.URL, nil)
+			reqPayload.Header.Set("User-Agent", req.Payload)
+		default:
+			json.NewEncoder(w).Encode(DefenseTestResult{
+				Success: false,
+				Message: "未知的攻击类型",
+			})
+			return
+		}
+
+		client := &http.Client{
+			Timeout: 10 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+
+		resp, err := client.Do(reqPayload)
+		duration := time.Since(startTime).Milliseconds()
+
+		if err != nil {
+			if strings.Contains(err.Error(), "connection refused") ||
+				strings.Contains(err.Error(), "timeout") ||
+				strings.Contains(err.Error(), "no such host") {
+				json.NewEncoder(w).Encode(DefenseTestResult{
+					Success:    true,
+					Blocked:    true,
+					StatusCode: 0,
+					Message:    "目标不可达或连接超时",
+					Duration:   duration,
+				})
+				return
+			}
+			json.NewEncoder(w).Encode(DefenseTestResult{
+				Success:  false,
+				Message:  fmt.Sprintf("请求失败: %v", err),
+				Duration: duration,
+			})
+			return
+		}
+		defer resp.Body.Close()
+
+		blocked := false
+		message := "请求正常通过"
+		if resp.StatusCode == 403 {
+			blocked = true
+			message = "请求被WAF拦截"
+		} else if resp.StatusCode == 302 || resp.StatusCode == 301 {
+			blocked = true
+			message = "请求被重定向(可能WAF拦截)"
+		}
+
+		json.NewEncoder(w).Encode(DefenseTestResult{
+			Success:    true,
+			Blocked:    blocked,
+			StatusCode: resp.StatusCode,
+			Message:    message,
+			Duration:   duration,
+		})
+	} else {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "仅支持POST请求",
+		})
+	}
 }

