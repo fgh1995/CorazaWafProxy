@@ -33,8 +33,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.2"
-const localVersionInt = 4020// 版本整数值，用于对比
+const frontendVersion = "v0.4.21"
+const localVersionInt = 4021// 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
@@ -2930,6 +2930,7 @@ func handleAbout(w http.ResponseWriter, r *http.Request) {
 	result = strings.ReplaceAll(result, "{localversion}", frontendVersion)
 	result = strings.ReplaceAll(result, "{remoteversion}", remoteVersionTxt)
 	result = strings.ReplaceAll(result, "{hasnewversion}", strconv.FormatBool(hasNewVersion))
+	result = strings.ReplaceAll(result, "{databaseversion}", getCurrentDBVersion())
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
