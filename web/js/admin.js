@@ -1969,7 +1969,7 @@ async function loadIPAccessLogs() {
             const urlLink = log.url ? `<a href="${log.url}" target="_blank" rel="noopener noreferrer" style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; text-decoration: none; color: var(--text-primary);">${log.url}</a>` : '-';
             
             row.innerHTML = `
-                <td><span style="background-color: ${resultColor}; color: #ffffff; padding: 2px 8px; border-radius:4px; font-size: 12px;">${resultText}</span></td>
+                <td><span style="background-color: ${resultColor}; color: #ffffff; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px;">${resultText}</span></td>
                 <td>${actionText}</td>
                 <td>${urlLink}</td>
                 <td>${log.ip}</td>
@@ -5812,15 +5812,17 @@ function updateSlider(containerId, sliderId, activeButtonId) {
     const container = document.getElementById(containerId);
     const slider = document.getElementById(sliderId);
     const activeButton = document.getElementById(activeButtonId);
-    
+
     if (!container || !slider || !activeButton) return;
-    
+
     const containerRect = container.getBoundingClientRect();
     const buttonRect = activeButton.getBoundingClientRect();
-    
+
+    if (containerRect.width === 0 || buttonRect.width === 0) return;
+
     const left = buttonRect.left - containerRect.left;
     const width = buttonRect.width;
-    
+
     slider.style.left = left + 'px';
     slider.style.width = width + 'px';
 }
@@ -5859,6 +5861,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         updateSlider('geoTabContainer', 'geoTabSlider', geoTabId);
         updateSlider('actionTabContainer-mobile', 'actionTabSlider-mobile', currentActionTab === 'access' ? 'geoTabAccess-mobile' : currentActionTab === 'detected' ? 'geoTabDetected-mobile' : 'geoTabBlocked-mobile');
         updateSlider('geoTabContainer-mobile', 'geoTabSlider-mobile', currentGeoTab === 'world' ? 'geoTabWorld-mobile' : 'geoTabChina-mobile');
+        if (geoMapChartWorld) geoMapChartWorld.resize();
+        if (geoMapChartChina) geoMapChartChina.resize();
+        if (window.geoMapChartWorldMobile) window.geoMapChartWorldMobile.resize();
+        if (window.geoMapChartChinaMobile) window.geoMapChartChinaMobile.resize();
     });
     
     setInterval(() => {

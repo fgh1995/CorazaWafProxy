@@ -1584,6 +1584,16 @@
                 font-size: 12px;
             }
 
+            .mobile-stats-group .trend-compare {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                margin-left: 0;
+                margin-top: 8px;
+                width: 100%;
+                font-size: 12px;
+            }
+
             .pagination-row .mui-select-legend {
                 display: none;
             }
@@ -1591,6 +1601,15 @@
             .card-title-inline {
                 flex-wrap: wrap;
                 gap: 8px;
+            }
+
+            .card-title-inline > div {
+                flex: 1 1 100%;
+                min-width: 100%;
+            }
+
+            .card-title-inline > button {
+                flex-shrink: 0;
             }
 
             #ip-list-tab > .card > div[style*="display: flex"][style*="gap: 16px"] {
@@ -2598,6 +2617,17 @@
                             <button class="trend-tab active" data-tab="ip">IP异常数量</button>
                             <button class="trend-tab" data-tab="attack">攻击异常数量</button>
                         </div>
+                        <div class="trend-compare">
+                            <span>对比</span>
+                            <label class="compare-label">
+                                <input type="radio" name="compare" value="prev-day" checked>
+                                <span>前一日</span>
+                            </label>
+                            <label class="compare-label">
+                                <input type="radio" name="compare" value="prev-week">
+                                <span>上周同期</span>
+                            </label>
+                        </div>
                         <div id="trend-chart-mobile" style="width: 100%; height: 200px;"></div>
                     </div>
 
@@ -2744,8 +2774,8 @@
 
             <div id="ip-logs-tab" class="tab-content">
                 <div class="card">
-                    <div class="card-title-inline">
-                        <div style="display: flex; gap: 12px;">
+                    <div class="card-title-inline" style="flex-wrap: wrap; gap: 8px;">
+                        <div style="display: flex; gap: 12px; flex-wrap: wrap;">
                             <div class="mui-select-wrapper">
                                 <select id="ipLogModeFilter" onchange="resetIPAccessLogsPage()" class="mui-select">
                                     <option value="">所有模式</option>
@@ -2770,10 +2800,12 @@
                                     <div class="mui-select-legend">结果</div>
                                 </div>
                             </div>
-                            <div style="display: flex; align-items: center; gap: 8px;">
-                                <input type="text" id="ipLogSearch" onkeyup="if(event.key==='Enter')resetIPAccessLogsPage()" placeholder="搜索关键字" style="padding: 6px 12px; border: 1px solid var(--border-light); border-radius: 6px; font-size: 14px; min-width: 150px;">
-                                <button class="btn btn-secondary" onclick="resetIPAccessLogsPage()" style="padding: 6px 12px;">🔍</button>
-                                <button class="btn btn-action" onclick="deleteIPAccessSearchResults()">🗑️ 删除搜索结果</button>
+                            <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                                    <input type="text" id="ipLogSearch" onkeyup="if(event.key==='Enter')resetIPAccessLogsPage()" placeholder="搜索关键字" style="padding: 6px 12px; border: 1px solid var(--border-light); border-radius: 6px; font-size: 14px; min-width: 120px; flex: 1;">
+                                    <button class="btn btn-secondary" onclick="resetIPAccessLogsPage()" style="padding: 6px 12px;">🔍</button>
+                                    <button class="btn btn-action" onclick="deleteIPAccessSearchResults()">🗑️ 删除搜索结果</button>
+                                </div>
                             </div>
                         </div>
                         <button class="btn btn-delete" onclick="clearIPAccessLogs()">🗑️ 清空日志</button>
@@ -2785,7 +2817,7 @@
                                 <th>结果</th>
                                 <th>动作</th>
                                 <th>URL</th>
-                                <th>IP地址</th>
+                                <th>来源IP</th>
                                 <th>地理位置</th>
                                 <th>模式</th>
                                 <th>转发类型</th>
@@ -2825,8 +2857,8 @@
 
             <div id="logs-tab" class="tab-content">
                 <div class="card">
-                    <div class="card-title-inline">
-                        <div style="display: flex; gap: 12px;">
+                    <div class="card-title-inline" style="flex-wrap: wrap; gap: 8px;">
+                        <div style="display: flex; gap: 12px; flex-wrap: wrap;">
                             <div class="mui-select-wrapper">
                                 <select id="logFilter" onchange="resetLogsPage()" class="mui-select">
                                     <option value="all">所有</option>
@@ -2841,8 +2873,8 @@
                                     <div class="mui-select-legend">动作</div>
                                 </div>
                             </div>
-                            <div style="display: flex; align-items: center; gap: 8px;">
-                                <input type="text" id="logSearch" onkeyup="if(event.key==='Enter')resetLogsPage()" placeholder="搜索关键字" style="padding: 6px 12px; border: 1px solid var(--border-light); border-radius: 6px; font-size: 14px; min-width: 150px;">
+                            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                                <input type="text" id="logSearch" onkeyup="if(event.key==='Enter')resetLogsPage()" placeholder="搜索关键字" style="padding: 6px 12px; border: 1px solid var(--border-light); border-radius: 6px; font-size: 14px; min-width: 120px; flex: 1;">
                                 <button class="btn btn-secondary" onclick="resetLogsPage()" style="padding: 6px 12px;">🔍</button>
                                 <button class="btn btn-action" onclick="deleteSearchResults()">🗑️ 删除搜索结果</button>
                             </div>
@@ -2856,7 +2888,7 @@
                                 <th>动作</th>
                                 <th>URL</th>
                                 <th>攻击类型</th>
-                                <th>源 IP</th>
+                                <th>来源IP</th>
                                 <th>地理位置</th>
                                 <th>时间</th>
                             </tr>
@@ -3331,13 +3363,20 @@
         function switchTab(tabName) {
             document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-            
+
             document.querySelector(`.nav-item[onclick="switchTab('${tabName}')"]`).classList.add('active');
             document.getElementById(`${tabName}-tab`).classList.add('active');
-            
+
             closeMobileMenu();
-            
-            if (tabName === 'ip-list') {
+
+            if (tabName === 'stats') {
+                setTimeout(() => {
+                    if (geoMapChartWorld) geoMapChartWorld.resize();
+                    if (geoMapChartChina) geoMapChartChina.resize();
+                    if (window.geoMapChartWorldMobile) window.geoMapChartWorldMobile.resize();
+                    if (window.geoMapChartChinaMobile) window.geoMapChartChinaMobile.resize();
+                }, 10);
+            } else if (tabName === 'ip-list') {
                 loadIPMode();
                 loadIPWhitelist();
                 loadIPBlacklist();
@@ -3351,8 +3390,6 @@
             } else if (tabName === 'logs') {
                 currentLogsPage = 1;
                 loadLogs();
-            } else if (tabName === 'stats') {
-                loadStats();
             } else if (tabName === 'settings') {
                 loadCurrentUser();
             } else if (tabName === 'about') {
