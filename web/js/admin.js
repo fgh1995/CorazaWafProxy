@@ -2,9 +2,11 @@ let availableRules = [];
 let wafInstances = [];
 let proxyInstances = [];
 let portForwardInstances = [];
+let certificates = [];
 let currentEditWAFId = null;
 let currentEditProxyId = null;
 let currentEditPortForwardId = null;
+let currentEditCertId = null;
 let confirmCallback = null;
 let statsData = {
     requestCount: 0,
@@ -744,9 +746,10 @@ function renderProxyInstances() {
     
     proxyInstances.forEach(instance => {
         const wafDisplay = instance.wafName || (instance.wafId ? '未绑定' : '未绑定');
+        const tlsBadge = instance.tlsEnabled ? '<span class="instance-badge" style="background: #34a853;">HTTPS</span>' : '';
         const div = document.createElement('div');
         div.className = 'instance-item';
-        
+
         div.innerHTML = `
             <div class="instance-header">
                 <div class="instance-name">
@@ -754,6 +757,7 @@ function renderProxyInstances() {
                     <span>${instance.name}</span>
                 </div>
                 <span class="instance-badge">端口: ${instance.listenPort}</span>
+                ${tlsBadge}
             </div>
             <div class="instance-grid">
                 <div class="instance-grid-item">
@@ -918,6 +922,11 @@ async function openCreateProxyModal() {
     document.getElementById('proxyEditName').value = '';
     document.getElementById('proxyEditPort').value = '';
     document.getElementById('proxyEditBackend').value = '';
+    document.getElementById('proxyEditTLSEnabled').checked = false;
+    document.getElementById('proxyEditTLSCertFile').value = '';
+    document.getElementById('proxyEditTLSKeyFile').value = '';
+    document.getElementById('proxyEditCertId').value = '';
+    toggleProxyTLSFields();
 
     const select = document.getElementById('proxyEditWAFId');
     select.innerHTML = '<option value="">不绑定 WAF</option>';
@@ -929,6 +938,7 @@ async function openCreateProxyModal() {
     });
     select.value = '';
 
+    await loadCertificatesForSelect();
     document.getElementById('proxyModal').classList.remove('modal-hidden');
 }
 
@@ -944,6 +954,10 @@ async function editProxyInstance(id) {
     document.getElementById('proxyEditName').value = instance.name;
     document.getElementById('proxyEditPort').value = instance.listenPort;
     document.getElementById('proxyEditBackend').value = instance.backend;
+    document.getElementById('proxyEditTLSEnabled').checked = instance.tlsEnabled || false;
+    document.getElementById('proxyEditTLSCertFile').value = instance.tlsCertFile || '';
+    document.getElementById('proxyEditTLSKeyFile').value = instance.tlsKeyFile || '';
+    toggleProxyTLSFields();
 
     const select = document.getElementById('proxyEditWAFId');
     select.innerHTML = '<option value="">不绑定 WAF</option>';
@@ -955,7 +969,36 @@ async function editProxyInstance(id) {
     });
     select.value = instance.wafId || '';
 
+    await loadCertificatesForSelect();
     document.getElementById('proxyModal').classList.remove('modal-hidden');
+}
+
+function toggleProxyTLSFields() {
+    const enabled = document.getElementById('proxyEditTLSEnabled').checked;
+    document.getElementById('proxyTLSFields').style.display = enabled ? 'block' : 'none';
+}
+
+function selectProxyCert() {
+    const certId = document.getElementById('proxyEditCertId').value;
+    if (certId) {
+        const cert = certificates.find(c => c.id === certId);
+        if (cert) {
+            document.getElementById('proxyEditTLSCertFile').value = cert.certFile || '';
+            document.getElementById('proxyEditTLSKeyFile').value = cert.keyFile || '';
+        }
+    }
+}
+
+async function loadCertificatesForSelect() {
+    const select = document.getElementById('proxyEditCertId');
+    if (!select) return;
+    select.innerHTML = '<option value="">选择证书...</option>';
+    certificates.forEach(cert => {
+        const option = document.createElement('option');
+        option.value = cert.id;
+        option.textContent = `${cert.name} (${cert.domains})`;
+        select.appendChild(option);
+    });
 }
 
 function closeProxyModal() {
@@ -968,9 +1011,17 @@ async function saveProxyEdit() {
     const listenPort = parseInt(document.getElementById('proxyEditPort').value);
     const backend = document.getElementById('proxyEditBackend').value;
     const wafId = document.getElementById('proxyEditWAFId').value;
+    const tlsEnabled = document.getElementById('proxyEditTLSEnabled').checked;
+    const tlsCertFile = document.getElementById('proxyEditTLSCertFile').value;
+    const tlsKeyFile = document.getElementById('proxyEditTLSKeyFile').value;
 
     if (!name || !listenPort || !backend) {
         showAlert('提示', '请填写完整信息');
+        return;
+    }
+
+    if (tlsEnabled && (!tlsCertFile || !tlsKeyFile)) {
+        showAlert('提示', '启用HTTPS需要提供证书和私钥文件路径');
         return;
     }
 
@@ -986,7 +1037,10 @@ async function saveProxyEdit() {
                     name: name,
                     listenPort: listenPort,
                     backend: backend,
-                    wafId: wafId
+                    wafId: wafId,
+                    tlsEnabled: tlsEnabled,
+                    tlsCertFile: tlsCertFile,
+                    tlsKeyFile: tlsKeyFile
                 })
             });
         } else {
@@ -999,7 +1053,10 @@ async function saveProxyEdit() {
                     name: name,
                     listenPort: listenPort,
                     backend: backend,
-                    wafId: wafId
+                    wafId: wafId,
+                    tlsEnabled: tlsEnabled,
+                    tlsCertFile: tlsCertFile,
+                    tlsKeyFile: tlsKeyFile
                 })
             });
         }
@@ -1038,6 +1095,453 @@ async function deleteProxyInstance(id) {
             }
         } catch (error) {
             console.error('删除防护应用失败:', error);
+            showAlert('错误', '删除失败');
+        }
+    });
+}
+
+async function loadCertificates() {
+    try {
+        const response = await fetch('/api/certificates');
+        const result = await response.json();
+
+        if (result.success) {
+            certificates = result.certificates || [];
+            renderCertificates();
+        }
+    } catch (error) {
+        console.error('加载证书失败:', error);
+    }
+}
+
+function renderCertificates() {
+    const container = document.getElementById('certInstancesList');
+    if (!container) return;
+
+    container.innerHTML = '';
+
+    if (certificates.length === 0) {
+        container.innerHTML = '<div style="display: flex; justify-content: center; align-items: center; height: 200px; color: var(--text-muted);">暂无证书，请点击"申请证书"创建</div>';
+        return;
+    }
+
+    certificates.forEach(cert => {
+        const div = document.createElement('div');
+        div.className = 'instance-item';
+
+        const statusClass = {
+            'pending': 'detection',
+            'valid': 'blocking',
+            'expired': 'off'
+        }[cert.status] || 'off';
+
+        const statusText = {
+            'pending': '待验证',
+            'valid': '有效',
+            'expired': '已过期'
+        }[cert.status] || cert.status;
+
+        const expiresAt = cert.expiresAt ? new Date(cert.expiresAt * 1000).toLocaleString('zh-CN') : '未知';
+        const autoRenewBadge = cert.autoRenew ? '<span class="instance-badge" style="background: #34a853;">自动续期</span>' : '';
+
+        div.innerHTML = `
+            <div class="instance-header">
+                <div class="instance-name">
+                    <span>🔐</span>
+                    <span>${cert.name}</span>
+                </div>
+                <span class="instance-status ${statusClass}">${statusText}</span>
+                ${autoRenewBadge}
+            </div>
+            <div class="instance-grid">
+                <div class="instance-grid-item">
+                    <div class="instance-grid-label">域名</div>
+                    <div class="instance-grid-value" style="white-space: pre-line;">${cert.domains}</div>
+                </div>
+                <div class="instance-grid-item">
+                    <div class="instance-grid-label">颁发机构</div>
+                    <div class="instance-grid-value">${cert.provider}</div>
+                </div>
+                <div class="instance-grid-item">
+                    <div class="instance-grid-label">到期时间</div>
+                    <div class="instance-grid-value">${expiresAt}</div>
+                </div>
+                <div class="instance-grid-item">
+                    <div class="instance-grid-label">证书文件</div>
+                    <div class="instance-grid-value">${cert.certFile || '未设置'}</div>
+                </div>
+            </div>
+            <div class="instance-actions">
+                <button class="btn-icon" onclick="viewCertLogs('${cert.id}')" title="查看日志">📜</button>
+                <button class="btn-icon" onclick="editCertificate('${cert.id}')" title="编辑">✏️</button>
+                ${cert.status === 'pending' ? `<button class="btn-icon" onclick="stopCertificate('${cert.id}')" title="停止">⏹️</button>` : ''}
+                ${cert.status === 'valid' ? `<button class="btn-icon" onclick="renewCertificate('${cert.id}')" title="续期">🔄</button>` : ''}
+                <button class="btn-icon delete" onclick="deleteCertificate('${cert.id}')" title="删除">🗑️</button>
+            </div>
+        `;
+        container.appendChild(div);
+    });
+}
+
+function openCreateCertModal() {
+    currentEditCertId = null;
+    document.getElementById('certModalTitle').textContent = '申请证书';
+    document.getElementById('certEditName').value = '';
+    document.getElementById('certEditProvider').value = 'letsencrypt';
+    document.getElementById('certEditZeroSSLEmail').value = '';
+    document.getElementById('certEditAcmeEmail').value = '';
+    document.getElementById('certEditCloudflareToken').value = '';
+    document.getElementById('certEditDomains').value = '';
+    document.getElementById('certEditAutoRenew').checked = true;
+    document.getElementById('certApplyForm').style.display = 'block';
+    document.getElementById('certLogContainer').style.display = 'none';
+    document.getElementById('certModalApplyBtn').disabled = false;
+    document.getElementById('certModalApplyBtn').textContent = '申请证书';
+    toggleCertFields();
+    document.getElementById('certModal').classList.remove('modal-hidden');
+}
+
+function closeCertModal() {
+    document.getElementById('certModal').classList.add('modal-hidden');
+    currentEditCertId = null;
+}
+
+function toggleCertFields() {
+    const provider = document.getElementById('certEditProvider').value;
+    const zerosslFields = document.getElementById('zerosslFields');
+    const letsencryptFields = document.getElementById('letsencryptFields');
+
+    if (provider === 'zerossl') {
+        zerosslFields.style.display = 'block';
+        letsencryptFields.style.display = 'none';
+    } else {
+        zerosslFields.style.display = 'none';
+        letsencryptFields.style.display = 'block';
+    }
+}
+
+async function applyCertificate() {
+    const name = document.getElementById('certEditName').value;
+    const provider = document.getElementById('certEditProvider').value;
+    const cloudflareToken = document.getElementById('certEditCloudflareToken').value;
+    const domainsText = document.getElementById('certEditDomains').value;
+    const autoRenew = document.getElementById('certEditAutoRenew').checked;
+
+    let acmeEmail = '';
+    let acmeKid = '';
+    let acmeHmacKey = '';
+    let acmeServerURL = '';
+
+    if (provider === 'zerossl') {
+        acmeEmail = document.getElementById('certEditZeroSSLEmail').value;
+        acmeServerURL = 'https://acme.zerossl.com/v2/DV90';
+        if (!acmeEmail) {
+            showAlert('提示', 'ZeroSSL 需要填写邮箱');
+            return;
+        }
+    } else {
+        acmeEmail = document.getElementById('certEditAcmeEmail').value;
+        acmeServerURL = 'https://acme-v02.api.letsencrypt.org/directory';
+    }
+
+    if (!name || !domainsText || !cloudflareToken) {
+        showAlert('提示', '请填写完整信息');
+        return;
+    }
+
+    const domains = domainsText.split('\n').map(d => d.trim()).filter(d => d);
+
+    if (domains.length === 0) {
+        showAlert('提示', '请至少添加一个域名');
+        return;
+    }
+
+    const applyForm = document.getElementById('certApplyForm');
+    const logContainer = document.getElementById('certLogContainer');
+    const logContent = document.getElementById('certLogContent');
+    const applyBtn = document.getElementById('certModalApplyBtn');
+    const cancelBtn = document.getElementById('certModalCancelBtn');
+
+    if (!applyForm || !logContainer || !logContent || !applyBtn || !cancelBtn) {
+        showAlert('错误', '页面元素缺失，请刷新重试');
+        return;
+    }
+
+    applyForm.style.display = 'none';
+    logContainer.style.display = 'block';
+    logContent.textContent = '正在提交申请...\n';
+    applyBtn.disabled = true;
+    cancelBtn.textContent = '关闭';
+
+    let logPollingInterval;
+
+    async function pollLogs(certId) {
+        try {
+            const logContent = document.getElementById('certLogContent');
+            if (!logContent || logContent.style.display === 'none') {
+                clearInterval(logPollingInterval);
+                return;
+            }
+            const response = await fetch(`/api/certificates/${certId}/logs`);
+            const data = await response.json();
+            if (data.success && data.logs) {
+                logContent.textContent = data.logs.join('\n');
+                logContent.scrollTop = logContent.scrollHeight;
+
+                if (data.logs.some(log => log.includes('证书申请完成') || log.includes('证书申请失败'))) {
+                    clearInterval(logPollingInterval);
+                    setTimeout(() => {
+                        const cancelBtn = document.getElementById('certModalCancelBtn');
+                        const applyBtn = document.getElementById('certModalApplyBtn');
+                        if (cancelBtn) cancelBtn.textContent = '关闭';
+                        if (applyBtn) applyBtn.disabled = false;
+                        if (data.logs.some(log => log.includes('证书申请完成'))) {
+                            closeCertModal();
+                            loadCertificates();
+                        }
+                    }, 2000);
+                    return;
+                }
+            }
+        } catch (error) {
+            console.error('获取日志失败:', error);
+        }
+    }
+
+    try {
+        const isEditing = currentEditCertId !== null;
+        const url = isEditing ? `/api/certificates/${currentEditCertId}` : '/api/certificates';
+        const method = isEditing ? 'PUT' : 'POST';
+
+        const response = await fetch(url, {
+            method: method,
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                name: name,
+                provider: provider,
+                domains: domains.join(','),
+                autoRenew: autoRenew,
+                cloudflareApiToken: cloudflareToken,
+                acmeEmail: acmeEmail,
+                acmeKid: acmeKid,
+                acmeHmacKey: acmeHmacKey,
+                acmeServerUrl: acmeServerURL
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            if (isEditing) {
+                closeCertModal();
+                loadCertificates();
+                showAlert('成功', '证书信息已更新');
+            } else {
+                closeCertModal();
+                loadCertificates();
+                showAlert('提示', '证书申请已开始，请在证书卡片中查看进度');
+            }
+        } else {
+            closeCertModal();
+            showAlert('错误', data.error || '未知错误');
+        }
+    } catch (error) {
+        console.error('证书申请失败:', error);
+        closeCertModal();
+        showAlert('错误', error.message);
+    }
+}
+
+function viewCertDetail(id) {
+    const cert = certificates.find(c => c.id === id);
+    if (!cert) {
+        showAlert('错误', '证书不存在');
+        return;
+    }
+
+    const expiresAt = cert.expiresAt ? new Date(cert.expiresAt * 1000).toLocaleString('zh-CN') : '未知';
+    const createdAt = cert.createdAt ? new Date(parseInt(cert.createdAt) * 1000).toLocaleString('zh-CN') : '未知';
+
+    const content = `
+        <div style="display: grid; gap: 16px;">
+            <div>
+                <strong style="color: var(--text-secondary);">证书名称</strong>
+                <div style="margin-top: 4px;">${cert.name}</div>
+            </div>
+            <div>
+                <strong style="color: var(--text-secondary);">域名列表</strong>
+                <div style="margin-top: 4px; white-space: pre-line;">${cert.domains}</div>
+            </div>
+            <div>
+                <strong style="color: var(--text-secondary);">颁发机构</strong>
+                <div style="margin-top: 4px;">${cert.provider}</div>
+            </div>
+            <div>
+                <strong style="color: var(--text-secondary);">状态</strong>
+                <div style="margin-top: 4px;">${cert.status}</div>
+            </div>
+            <div>
+                <strong style="color: var(--text-secondary);">证书文件</strong>
+                <div style="margin-top: 4px;">${cert.certFile || '未设置'}</div>
+            </div>
+            <div>
+                <strong style="color: var(--text-secondary);">私钥文件</strong>
+                <div style="margin-top: 4px;">${cert.keyFile || '未设置'}</div>
+            </div>
+            <div>
+                <strong style="color: var(--text-secondary);">CA文件</strong>
+                <div style="margin-top: 4px;">${cert.caFile || '未设置'}</div>
+            </div>
+            <div>
+                <strong style="color: var(--text-secondary);">到期时间</strong>
+                <div style="margin-top: 4px;">${expiresAt}</div>
+            </div>
+            <div>
+                <strong style="color: var(--text-secondary);">创建时间</strong>
+                <div style="margin-top: 4px;">${createdAt}</div>
+            </div>
+            <div>
+                <strong style="color: var(--text-secondary);">自动续期</strong>
+                <div style="margin-top: 4px;">${cert.autoRenew ? '已启用' : '未启用'}</div>
+            </div>
+        </div>
+    `;
+
+    document.getElementById('certDetailContent').innerHTML = content;
+    document.getElementById('certDetailModal').classList.remove('modal-hidden');
+}
+
+function closeCertDetailModal() {
+    document.getElementById('certDetailModal').classList.add('modal-hidden');
+}
+
+async function viewCertLogs(id) {
+    try {
+        const response = await fetch(`/api/certificates/${id}/logs`);
+        const data = await response.json();
+
+        if (data.success && data.logs) {
+            const content = `
+                <div style="margin-bottom: 16px;">
+                    <strong style="color: var(--text-secondary);">申请日志</strong>
+                    <div id="certLogViewContent" style="background: #1e1e1e; color: #00ff00; padding: 12px; border-radius: 6px; font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; margin-top: 8px;">${data.logs.join('\n')}</div>
+                </div>
+            `;
+            document.getElementById('certDetailContent').innerHTML = content;
+            document.getElementById('certDetailModal').classList.remove('modal-hidden');
+
+            const logContent = document.getElementById('certLogViewContent');
+            logContent.scrollTop = logContent.scrollHeight;
+        } else {
+            showAlert('错误', '获取日志失败');
+        }
+    } catch (error) {
+        console.error('获取日志失败:', error);
+        showAlert('错误', error.message);
+    }
+}
+
+function editCertificate(id) {
+    const cert = certificates.find(c => c.id === id);
+    if (!cert) {
+        showAlert('错误', '证书不存在');
+        return;
+    }
+
+    currentEditCertId = id;
+    document.getElementById('certModalTitle').textContent = '编辑证书';
+    document.getElementById('certEditName').value = cert.name;
+    document.getElementById('certEditProvider').value = cert.provider || 'letsencrypt';
+    document.getElementById('certEditCloudflareToken').value = cert.cloudflareApiToken || '';
+    document.getElementById('certEditDomains').value = cert.domains || '';
+    document.getElementById('certEditAutoRenew').checked = cert.autoRenew === true || cert.autoRenew === 1;
+    document.getElementById('certApplyForm').style.display = 'block';
+    document.getElementById('certLogContainer').style.display = 'none';
+    document.getElementById('certModalApplyBtn').disabled = false;
+    document.getElementById('certModalApplyBtn').textContent = '保存';
+
+    if (cert.provider === 'zerossl') {
+        document.getElementById('certEditZeroSSLEmail').value = cert.acmeEmail || '';
+        document.getElementById('zerosslFields').style.display = 'block';
+        document.getElementById('letsencryptFields').style.display = 'none';
+    } else {
+        document.getElementById('certEditAcmeEmail').value = cert.acmeEmail || '';
+        document.getElementById('zerosslFields').style.display = 'none';
+        document.getElementById('letsencryptFields').style.display = 'block';
+    }
+
+    document.getElementById('certModal').classList.remove('modal-hidden');
+}
+
+async function stopCertificate(id) {
+    showConfirm('确定要停止此证书的申请吗？', async (confirmed) => {
+        if (!confirmed) return;
+
+        try {
+            const response = await fetch(`/api/certificates/${id}/stop`, {
+                method: 'POST'
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                showAlert('成功', '证书申请已停止');
+                loadCertificates();
+            } else {
+                showAlert('错误', data.error || '停止失败');
+            }
+        } catch (error) {
+            console.error('停止证书失败:', error);
+            showAlert('错误', error.message);
+        }
+    });
+}
+
+async function renewCertificate(id) {
+    showConfirm('确定要续期此证书吗？', async (confirmed) => {
+        if (!confirmed) return;
+
+        try {
+            const response = await fetch(`/api/certificates/${id}/renew`, {
+                method: 'POST'
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                showAlert('成功', '证书续期请求已提交');
+                await loadCertificates();
+            } else {
+                showAlert('错误', '证书续期失败: ' + data.error);
+            }
+        } catch (error) {
+            console.error('证书续期失败:', error);
+            showAlert('错误', '证书续期失败');
+        }
+    });
+}
+
+async function deleteCertificate(id) {
+    showConfirm('确定要删除此证书吗？', async (confirmed) => {
+        if (!confirmed) return;
+
+        try {
+            const response = await fetch(`/api/certificates/${id}`, {
+                method: 'DELETE'
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                showAlert('成功', '证书删除成功');
+                await loadCertificates();
+            } else {
+                showAlert('错误', '删除失败');
+            }
+        } catch (error) {
+            console.error('删除证书失败:', error);
             showAlert('错误', '删除失败');
         }
     });
@@ -5842,6 +6346,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     loadAvailableRules();
     await loadWAFInstances();
     loadProxyInstances();
+    loadCertificates();
     loadPortForwardInstances();
     loadLogs();
     loadStats();

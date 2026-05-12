@@ -2063,6 +2063,10 @@
                     <span class="nav-icon">🌐</span>
                     <span class="nav-text">防护应用</span>
                 </a>
+                <a href="#cert" class="nav-item" onclick="switchTab('cert')">
+                    <span class="nav-icon">🔐</span>
+                    <span class="nav-text">证书</span>
+                </a>
                 <a href="#waf" class="nav-item" onclick="switchTab('waf')">
                     <span class="nav-icon">🛡️</span>
                     <span class="nav-text">CorazaWAF</span>
@@ -2693,6 +2697,25 @@
                 </div>
             </div>
 
+            <div id="cert-tab" class="tab-content">
+                <div class="card">
+                    <div class="card-title-inline">
+                        <h2>SSL/TLS 证书管理</h2>
+                        <button class="btn btn-primary" onclick="openCreateCertModal()">➕ 申请证书</button>
+                    </div>
+                    <div style="padding: 20px 24px;">
+                        <div style="margin-bottom: 20px; padding: 16px; background: linear-gradient(135deg, rgba(26, 115, 232, 0.1) 0%, rgba(26, 115, 232, 0.05) 100%); border-radius: 8px; border: 1px solid rgba(26, 115, 232, 0.3);">
+                            <h3 style="margin: 0 0 12px 0; color: var(--primary-blue); font-size: 16px;">🏢 ZeroSSL + Cloudflare DNS 证书申请</h3>
+                            <p style="margin: 0; color: var(--text-secondary); font-size: 14px; line-height: 1.6;">
+                                支持通过 ZeroSSL 申请免费 SSL 证书，使用 Cloudflare DNS 进行域名验证。<br>
+                                支持通配符域名（如 *.example.com），证书自动续期。
+                            </p>
+                        </div>
+                        <div class="instance-list" id="certInstancesList"></div>
+                    </div>
+                </div>
+            </div>
+
             <div id="waf-tab" class="tab-content">
                 <div class="card">
                     <div class="card-title-inline">
@@ -3068,10 +3091,108 @@
                         <option value="">不绑定 WAF</option>
                     </select>
                 </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="proxyEditTLSEnabled" onchange="toggleProxyTLSFields()">
+                        启用 HTTPS
+                    </label>
+                </div>
+                <div id="proxyTLSFields" style="display: none;">
+                    <div class="form-group">
+                        <label>证书文件路径</label>
+                        <input type="text" id="proxyEditTLSCertFile" placeholder="例如: data/certs/cert.pem">
+                    </div>
+                    <div class="form-group">
+                        <label>私钥文件路径</label>
+                        <input type="text" id="proxyEditTLSKeyFile" placeholder="例如: data/certs/key.pem">
+                    </div>
+                    <div class="form-group">
+                        <label>或选择已有证书</label>
+                        <select id="proxyEditCertId" onchange="selectProxyCert()">
+                            <option value="">选择证书...</option>
+                        </select>
+                    </div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn" onclick="closeProxyModal()">取消</button>
                 <button class="btn btn-primary" onclick="saveProxyEdit()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="certModal" class="modal modal-hidden">
+        <div class="modal-content" style="max-width: 700px;">
+            <div class="modal-header">
+                <h3 id="certModalTitle">申请证书</h3>
+                <button class="modal-close" onclick="closeCertModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="certApplyForm">
+                    <div style="margin-bottom: 20px; padding: 12px; background: #e8f5e9; border-radius: 6px; border-left: 4px solid #4caf50;">
+                        <p style="margin: 0; font-size: 13px; color: #2e7d32;"><strong>💡 提示：</strong>Let's Encrypt 和 ZeroSSL 都完全免费。Let's Encrypt 无需注册，ZeroSSL 首次需要邮箱注册账户。</p>
+                    </div>
+                    <div class="form-group">
+                        <label>证书名称</label>
+                        <input type="text" id="certEditName" placeholder="例如: 我的泛域名证书">
+                    </div>
+                    <div class="form-group">
+                        <label>证书颁发机构</label>
+                        <select id="certEditProvider" onchange="toggleCertFields()">
+                            <option value="letsencrypt">Let's Encrypt (免费，无需 EAB)</option>
+                            <option value="zerossl">ZeroSSL (需要 EAB)</option>
+                        </select>
+                    </div>
+                    <div id="zerosslFields" style="display: none;">
+                        <div class="form-group">
+                            <label>ZeroSSL 邮箱</label>
+                            <input type="email" id="certEditZeroSSLEmail" placeholder="your@email.com">
+                            <small style="color: var(--text-muted);">用于注册 ZeroSSL 账户，可通过 <a href="https://app.zerossl.com" target="_blank">ZeroSSL 控制台</a> 管理证书</small>
+                        </div>
+                    </div>
+                    <div id="letsencryptFields">
+                        <div class="form-group">
+                            <label>邮箱 <small style="color: var(--text-muted);">(可选，用于证书到期提醒)</small></label>
+                            <input type="email" id="certEditAcmeEmail" placeholder="your@email.com">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Cloudflare API Token</label>
+                        <input type="password" id="certEditCloudflareToken" placeholder="Cloudflare API Token">
+                        <small style="color: var(--text-muted);">需要 DNS:Edit 权限 | <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank">创建 Token</a></small>
+                    </div>
+                    <div class="form-group">
+                        <label>域名列表 <small style="color: var(--text-muted);">(每行一个，支持通配符 *)</small></label>
+                        <textarea id="certEditDomains" rows="4" placeholder="*.example.com&#10;*.v4.example.com&#10;example.com"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="certEditAutoRenew" checked>
+                            启用自动续期（证书到期前7天自动申请新证书）
+                        </label>
+                    </div>
+                </div>
+                <div id="certLogContainer" style="display: none;">
+                    <div style="margin-bottom: 10px; font-weight: 600; color: var(--primary-color);">申请进度：</div>
+                    <div id="certLogContent" style="background: #1e1e1e; color: #00ff00; padding: 12px; border-radius: 6px; font-family: monospace; font-size: 12px; max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" id="certModalCancelBtn" onclick="closeCertModal()">取消</button>
+                <button class="btn btn-primary" id="certModalApplyBtn" onclick="applyCertificate()">申请证书</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="certDetailModal" class="modal modal-hidden">
+        <div class="modal-content" style="max-width: 600px;">
+            <div class="modal-header">
+                <h3>证书详情</h3>
+                <button class="modal-close" onclick="closeCertDetailModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="certDetailContent"></div>
+            <div class="modal-footer">
+                <button class="btn" onclick="closeCertDetailModal()">关闭</button>
             </div>
         </div>
     </div>
@@ -3387,6 +3508,8 @@
             } else if (tabName === 'proxy') {
                 loadProxyInstances();
                 loadPortForwardInstances();
+            } else if (tabName === 'cert') {
+                loadCertificates();
             } else if (tabName === 'logs') {
                 currentLogsPage = 1;
                 loadLogs();

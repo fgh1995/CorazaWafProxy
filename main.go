@@ -4,13 +4,22 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"database/sql"
+	"encoding/pem"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -29,20 +38,52 @@ import (
 
 	"github.com/corazawaf/coraza/v3"
 	"github.com/corazawaf/coraza/v3/types"
+	"github.com/go-acme/lego/v4/certcrypto"
+	"github.com/go-acme/lego/v4/lego"
+	"github.com/go-acme/lego/v4/providers/dns/cloudflare"
+	"github.com/go-acme/lego/v4/registration"
+	"github.com/go-acme/lego/v4/certificate"
 	"github.com/oschwald/geoip2-golang"
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.21"
-const localVersionInt = 4021// 版本整数值，用于对比
+const frontendVersion = "v0.4.3-beta"
+const localVersionInt = 4030// 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
 var proxyInstances = make(map[string]*ProxyInstance)
 var portForwardInstances = make(map[string]*PortForwardInstance)
+var certificates = make(map[string]*Certificate)
+var certificateLogs = make(map[string][]string)
+var certificateLogMutex sync.Mutex
+
+func addCertLog(certID, message string) {
+	certificateLogMutex.Lock()
+	defer certificateLogMutex.Unlock()
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	logEntry := fmt.Sprintf("[%s] %s", timestamp, message)
+	certificateLogs[certID] = append(certificateLogs[certID], logEntry)
+}
+
+func getCertLogs(certID string) []string {
+	certificateLogMutex.Lock()
+	defer certificateLogMutex.Unlock()
+	logs := certificateLogs[certID]
+	return logs
+}
+
+func clearCertLogs(certID string) {
+	certificateLogMutex.Lock()
+	defer certificateLogMutex.Unlock()
+	delete(certificateLogs, certID)
+}
+
 var wafMutex sync.RWMutex
 var proxyMutex sync.RWMutex
 var portForwardMutex sync.RWMutex
+var certificateMutex sync.RWMutex
+var certStopChannels sync.Map
 var attackLogs []AttackLog
 var logsMutex sync.Mutex
 var geoipReader *geoip2.Reader
@@ -139,7 +180,7 @@ func getUTCTimestamp() int64 {
 	return time.Now().UTC().Unix()
 }
 
-const currentDBVersion = "1.2"
+const currentDBVersion = "1.3"
 
 func getCurrentDBVersion() string {
 	var version string
@@ -243,43 +284,38 @@ func backupDatabase() (string, error) {
 	return backupPath, nil
 }
 
-func upgradeDBFrom10To11() error {
-	initUpgradeProgress()
-	log.Println("开始升级数据库从版本1.0到1.1...")
-	
-	go func() {
-		err := performUpgradeSteps("1.1")
-		if err != nil {
-			setUpgradeError(err.Error())
-			log.Printf("数据库升级失败: %v", err)
-		} else {
-			// 1.0→1.1 完成后，继续升级到 1.2
-			log.Println("1.0→1.1 升级完成，继续升级到 1.2...")
-			err := upgradeDBFrom11To12InPlace()
-			if err != nil {
-				setUpgradeError(err.Error())
-				log.Printf("1.1→1.2 升级失败: %v", err)
-			} else {
-				setUpgradeCompleted()
-				log.Println("数据库升级完成，当前版本: 1.2")
-			}
+func convertTimeStringToTimestamp(timeStr string) int64 {
+	formats := []string{
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05",
+	}
+
+	for _, format := range formats {
+		t, err := time.Parse(format, timeStr)
+		if err == nil {
+			return t.Unix()
 		}
-	}()
-	
-	return nil
+	}
+
+	log.Printf("无法解析时间字符串: %s，使用当前时间", timeStr)
+	return getUTCTimestamp()
 }
 
-func performUpgradeSteps(targetVersion string) error {
-	updateUpgradeProgress("backingup", 0, 100, "正在备份数据库...")
-	log.Println("开始备份数据库...")
-	
+func upgradeTo11() error {
+	log.Println("升级到版本 1.1...")
+	updateUpgradeProgress("backingup", 0, 2, "备份数据库...")
+
 	backupPath, err := backupDatabase()
 	if err != nil {
 		log.Printf("数据库备份失败: %v", err)
 		return fmt.Errorf("数据库备份失败: %v", err)
 	}
-	log.Printf("数据库备份成功，备份文件: %s", backupPath)
-	
+	log.Printf("数据库备份成功: %s", backupPath)
+
+	updateUpgradeProgress("upgrading", 0, 2, "转换时间字段...")
+
 	tables := []struct {
 		name        string
 		idCol       string
@@ -299,82 +335,49 @@ func performUpgradeSteps(targetVersion string) error {
 		{"ip_access_logs", "id", "created_at", "IP访问日志", "int"},
 		{"webhook_settings", "id", "updated_at", "Webhook设置", "int"},
 	}
-	
-	log.Println("统计所有表的记录数...")
-	var totalRecords int64
-	tableRecords := make([]int, len(tables))
-	for idx, table := range tables {
+
+	batchSize := 1000
+	for _, table := range tables {
 		var count int
 		query := fmt.Sprintf("SELECT COUNT(*) FROM %s", table.name)
 		db.QueryRow(query).Scan(&count)
-		tableRecords[idx] = count
-		totalRecords += int64(count)
-		log.Printf("%s表: %d条记录", table.displayName, count)
-	}
-	
-	log.Printf("总记录数: %d", totalRecords)
-	
-	updateUpgradeProgress("upgrading", 0, int(totalRecords), "开始升级...")
-	
-	var processedRecords int64 = 0
-	batchSize := 1000
-	
-	for idx, table := range tables {
-		count := tableRecords[idx]
 		if count == 0 {
-			log.Printf("%s表为空，跳过", table.displayName)
 			continue
 		}
-		
-		log.Printf("转换%s表的时间字段... (%d条)", table.displayName, count)
-		
+
 		processed := 0
 		for processed < count {
 			batchEnd := processed + batchSize
 			if batchEnd > count {
 				batchEnd = count
 			}
-			
+
 			var rows *sql.Rows
-			var err error
-			
 			if table.idType == "int" {
 				query := fmt.Sprintf("SELECT id, %s FROM %s LIMIT ? OFFSET ?", table.timeCol, table.name)
-				rows, err = db.Query(query, batchSize, processed)
+				rows, _ = db.Query(query, batchSize, processed)
 			} else {
 				query := fmt.Sprintf("SELECT %s, %s FROM %s LIMIT ? OFFSET ?", table.idCol, table.timeCol, table.name)
-				rows, err = db.Query(query, batchSize, processed)
+				rows, _ = db.Query(query, batchSize, processed)
 			}
-			
-			if err != nil {
-				return fmt.Errorf("查询%s失败: %w", table.displayName, err)
-			}
-			
+
 			updates := make([]struct {
 				id        interface{}
 				timestamp int64
 			}, 0)
-			
+
 			for rows.Next() {
 				var id interface{}
 				var timeStr string
-				
 				if table.idType == "int" {
 					var intId int
-					if err := rows.Scan(&intId, &timeStr); err != nil {
-						rows.Close()
-						return fmt.Errorf("读取%s记录失败: %w", table.displayName, err)
-					}
+					rows.Scan(&intId, &timeStr)
 					id = intId
 				} else {
 					var textId string
-					if err := rows.Scan(&textId, &timeStr); err != nil {
-						rows.Close()
-						return fmt.Errorf("读取%s记录失败: %w", table.displayName, err)
-					}
+					rows.Scan(&textId, &timeStr)
 					id = textId
 				}
-				
 				timestamp := convertTimeStringToTimestamp(timeStr)
 				updates = append(updates, struct {
 					id        interface{}
@@ -382,129 +385,122 @@ func performUpgradeSteps(targetVersion string) error {
 				}{id, timestamp})
 			}
 			rows.Close()
-			
-			tx, err := db.Begin()
-			if err != nil {
-				return fmt.Errorf("开始事务失败: %w", err)
-			}
-			
-			stmt, err := tx.Prepare(fmt.Sprintf("UPDATE %s SET %s = ? WHERE %s = ?", table.name, table.timeCol, table.idCol))
-			if err != nil {
-				tx.Rollback()
-				return fmt.Errorf("预处理语句失败: %w", err)
-			}
-			
+
+			tx, _ := db.Begin()
+			stmt, _ := tx.Prepare(fmt.Sprintf("UPDATE %s SET %s = ? WHERE %s = ?", table.name, table.timeCol, table.idCol))
 			for _, u := range updates {
-				_, err = stmt.Exec(u.timestamp, u.id)
-				if err != nil {
-					stmt.Close()
-					tx.Rollback()
-					return fmt.Errorf("更新%s记录失败: %w", table.displayName, err)
-				}
+				stmt.Exec(u.timestamp, u.id)
 			}
-			
 			stmt.Close()
-			if err := tx.Commit(); err != nil {
-				return fmt.Errorf("提交事务失败: %w", err)
-			}
-			
-			processedRecords += int64(batchEnd - processed)
-			if processedRecords > totalRecords {
-				processedRecords = totalRecords
-			}
+			tx.Commit()
+
 			processed = batchEnd
-			updateUpgradeProgress("upgrading", int(processedRecords), int(totalRecords), fmt.Sprintf("升级中: %s (%d/%d)", table.displayName, processed, count))
 		}
+		log.Printf("升级 %s 表完成", table.displayName)
 	}
-	
-	updateUpgradeProgress("finalizing", int(totalRecords), int(totalRecords), "清理WAL文件...")
 
 	_, err = db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	if err != nil {
 		log.Printf("清理WAL文件失败: %v", err)
 	}
-	
-	updateUpgradeProgress("completed", int(totalRecords), int(totalRecords), "升级完成")
-	
-	err = setDBVersion(targetVersion)
+
+	updateUpgradeProgress("finalizing", 2, 2, "更新数据库版本...")
+	err = setDBVersion("1.1")
 	if err != nil {
 		return fmt.Errorf("更新数据库版本失败: %w", err)
 	}
-	
+
+	log.Println("升级到 1.1 完成")
 	return nil
 }
 
-func convertTimeStringToTimestamp(timeStr string) int64 {
-	// 尝试解析多种时间格式
-	formats := []string{
-		time.RFC3339,
-		"2006-01-02 15:04:05",
-		"2006-01-02T15:04:05Z",
-		"2006-01-02T15:04:05",
-	}
-	
-	for _, format := range formats {
-		t, err := time.Parse(format, timeStr)
-		if err == nil {
-			return t.Unix()
-		}
-	}
-	
-	// 如果都解析失败，返回当前时间戳
-	log.Printf("无法解析时间字符串: %s，使用当前时间", timeStr)
-	return getUTCTimestamp()
-}
-
-func upgradeDBFrom11To12() error {
-	initUpgradeProgress()
-	log.Println("开始升级数据库从版本1.1到1.2...")
-	
-	go func() {
-		err := upgradeDBFrom11To12InPlace()
-		if err != nil {
-			setUpgradeError(err.Error())
-			log.Printf("数据库升级失败: %v", err)
-		} else {
-			setUpgradeCompleted()
-			log.Println("数据库升级完成，当前版本: 1.2")
-		}
-	}()
-	
-	return nil
-}
-
-func upgradeDBFrom11To12InPlace() error {
-	log.Println("开始升级数据库从版本1.1到1.2...")
+func upgradeTo12() error {
+	log.Println("升级到版本 1.2...")
 	updateUpgradeProgress("upgrading", 0, 2, "添加 platform 字段...")
-	
+
 	_, err := db.Exec("ALTER TABLE attack_logs ADD COLUMN platform TEXT DEFAULT 'Unknown'")
-	if err != nil {
-		if !strings.Contains(err.Error(), "duplicate column") {
-			log.Printf("添加platform字段失败: %v", err)
-			return err
-		}
-		log.Println("platform字段已存在，跳过")
-	}
-	
-	updateUpgradeProgress("upgrading", 1, 2, "添加 browser 字段...")
-	
-	_, err = db.Exec("ALTER TABLE attack_logs ADD COLUMN browser TEXT DEFAULT 'Unknown'")
-	if err != nil {
-		if !strings.Contains(err.Error(), "duplicate column") {
-			log.Printf("添加browser字段失败: %v", err)
-			return err
-		}
-		log.Println("browser字段已存在，跳过")
-	}
-	
-	updateUpgradeProgress("finalizing", 2, 2, "更新数据库版本...")
-	
-	err = setDBVersion("1.2")
-	if err != nil {
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		log.Printf("添加platform字段失败: %v", err)
 		return err
 	}
-	
-	log.Println("数据库升级完成，当前版本: 1.2")
+	log.Println("platform字段已添加/已存在")
+
+	updateUpgradeProgress("upgrading", 1, 2, "添加 browser 字段...")
+
+	_, err = db.Exec("ALTER TABLE attack_logs ADD COLUMN browser TEXT DEFAULT 'Unknown'")
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		log.Printf("添加browser字段失败: %v", err)
+		return err
+	}
+	log.Println("browser字段已添加/已存在")
+
+	updateUpgradeProgress("finalizing", 2, 2, "更新数据库版本...")
+	err = setDBVersion("1.2")
+	if err != nil {
+		return fmt.Errorf("更新数据库版本失败: %w", err)
+	}
+
+	log.Println("升级到 1.2 完成")
+	return nil
+}
+
+func upgradeTo13() error {
+	log.Println("升级到版本 1.3...")
+	updateUpgradeProgress("upgrading", 0, 4, "添加 tls_enabled 字段到 proxy_instances...")
+
+	_, err := db.Exec("ALTER TABLE proxy_instances ADD COLUMN tls_enabled INTEGER DEFAULT 0")
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		log.Printf("添加 tls_enabled 字段失败: %v", err)
+		return err
+	}
+	log.Println("tls_enabled 字段已添加/已存在")
+
+	updateUpgradeProgress("upgrading", 1, 4, "添加 tls_cert_file 字段到 proxy_instances...")
+
+	_, err = db.Exec("ALTER TABLE proxy_instances ADD COLUMN tls_cert_file TEXT")
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		log.Printf("添加 tls_cert_file 字段失败: %v", err)
+		return err
+	}
+	log.Println("tls_cert_file 字段已添加/已存在")
+
+	updateUpgradeProgress("upgrading", 2, 4, "添加 tls_key_file 字段到 proxy_instances...")
+
+	_, err = db.Exec("ALTER TABLE proxy_instances ADD COLUMN tls_key_file TEXT")
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		log.Printf("添加 tls_key_file 字段失败: %v", err)
+		return err
+	}
+	log.Println("tls_key_file 字段已添加/已存在")
+
+	updateUpgradeProgress("upgrading", 3, 4, "添加 ACME 字段到 certificates...")
+
+	acmeFields := []struct {
+		field string
+		sql   string
+	}{
+		{"acme_kid", "ALTER TABLE certificates ADD COLUMN acme_kid TEXT"},
+		{"acme_hmac_key", "ALTER TABLE certificates ADD COLUMN acme_hmac_key TEXT"},
+		{"acme_server_url", "ALTER TABLE certificates ADD COLUMN acme_server_url TEXT"},
+		{"acme_email", "ALTER TABLE certificates ADD COLUMN acme_email TEXT"},
+	}
+
+	for _, f := range acmeFields {
+		_, err = db.Exec(f.sql)
+		if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			log.Printf("添加 %s 字段失败: %v", f.field, err)
+			return err
+		}
+		log.Printf("%s 字段已添加/已存在", f.field)
+	}
+
+	updateUpgradeProgress("finalizing", 4, 4, "更新数据库版本...")
+	err = setDBVersion("1.3")
+	if err != nil {
+		return fmt.Errorf("更新数据库版本失败: %w", err)
+	}
+
+	log.Println("升级到 1.3 完成")
 	return nil
 }
 
@@ -525,15 +521,38 @@ type WAFInstance struct {
 }
 
 type ProxyInstance struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	ListenPort int    `json:"listenPort"`
-	Backend    string `json:"backend"`
-	WAFID      string `json:"wafId"`
-	WAFName    string `json:"wafName,omitempty"`
-	Proxy      *httputil.ReverseProxy `json:"-"`
-	Server     *http.Server `json:"-"`
-	CreatedAt  string `json:"createdAt"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	ListenPort    int    `json:"listenPort"`
+	Backend       string `json:"backend"`
+	WAFID         string `json:"wafId"`
+	WAFName       string `json:"wafName,omitempty"`
+	Proxy         *httputil.ReverseProxy `json:"-"`
+	Server        *http.Server `json:"-"`
+	TLSEnabled    bool   `json:"tlsEnabled"`
+	TLSCertFile   string `json:"tlsCertFile"`
+	TLSKeyFile    string `json:"tlsKeyFile"`
+	CreatedAt     string `json:"createdAt"`
+}
+
+type Certificate struct {
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Domains         string `json:"domains"`
+	Provider        string `json:"provider"`
+	CertFile        string `json:"certFile"`
+	KeyFile         string `json:"keyFile"`
+	CaFile          string `json:"caFile"`
+	ExpiresAt       int64  `json:"expiresAt"`
+	AutoRenew       bool   `json:"autoRenew"`
+	Status          string `json:"status"`
+	CreatedAt       string `json:"createdAt"`
+	CloudflareAPIToken string `json:"cloudflareApiToken"`
+	CloudflareEmail     string `json:"cloudflareEmail"`
+	AcmeKid         string `json:"acmeKid"`
+	AcmeHmacKey     string `json:"acmeHmacKey"`
+	AcmeServerURL   string `json:"acmeServerUrl"`
+	AcmeEmail       string `json:"acmeEmail"`
 }
 
 type PortForwardInstance struct {
@@ -749,8 +768,31 @@ func initDB() error {
 		listen_port INTEGER NOT NULL,
 		backend TEXT NOT NULL,
 		waf_id TEXT,
+		tls_enabled INTEGER DEFAULT 0,
+		tls_cert_file TEXT,
+		tls_key_file TEXT,
 		created_at INTEGER NOT NULL,
 		FOREIGN KEY (waf_id) REFERENCES waf_instances(id)
+	);
+
+	CREATE TABLE IF NOT EXISTS certificates (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		domains TEXT NOT NULL,
+		provider TEXT NOT NULL,
+		cert_file TEXT,
+		key_file TEXT,
+		ca_file TEXT,
+		expires_at INTEGER,
+		auto_renew INTEGER DEFAULT 0,
+		status TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		cloudflare_api_token TEXT,
+		cloudflare_email TEXT,
+		acme_kid TEXT,
+		acme_hmac_key TEXT,
+		acme_server_url TEXT,
+		acme_email TEXT
 	);
 
 	CREATE TABLE IF NOT EXISTS port_forward_instances (
@@ -1368,7 +1410,7 @@ func createWAFInstance(name, mode string, rules []string) (*WAFInstance, error) 
 	return instance, nil
 }
 
-func createProxyInstance(name string, listenPort int, backend, wafID string) (*ProxyInstance, error) {
+func createProxyInstance(name string, listenPort int, backend, wafID string, tlsEnabled bool, tlsCertFile, tlsKeyFile string) (*ProxyInstance, error) {
 	if listenPort == adminPort {
 		return nil, fmt.Errorf("端口 %d 与管理服务端口冲突", listenPort)
 	}
@@ -1408,22 +1450,30 @@ func createProxyInstance(name string, listenPort int, backend, wafID string) (*P
 
 	createdAt := getUTCTimestamp()
 
+	tlsEnabledInt := 0
+	if tlsEnabled {
+		tlsEnabledInt = 1
+	}
+
 	_, err = db.Exec(
-		"INSERT INTO proxy_instances (id, name, listen_port, backend, waf_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-		id, name, listenPort, backend, wafID, createdAt,
+		"INSERT INTO proxy_instances (id, name, listen_port, backend, waf_id, created_at, tls_enabled, tls_cert_file, tls_key_file) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		id, name, listenPort, backend, wafID, createdAt, tlsEnabledInt, tlsCertFile, tlsKeyFile,
 	)
 	if err != nil {
 		return nil, err
 	}
 
 	instance := &ProxyInstance{
-		ID:         id,
-		Name:       name,
-		ListenPort: listenPort,
-		Backend:    backend,
-		WAFID:      wafID,
-		Proxy:      proxy,
-		CreatedAt:  fmt.Sprintf("%d", createdAt),
+		ID:           id,
+		Name:         name,
+		ListenPort:   listenPort,
+		Backend:      backend,
+		WAFID:        wafID,
+		Proxy:        proxy,
+		TLSEnabled:   tlsEnabled,
+		TLSCertFile:  tlsCertFile,
+		TLSKeyFile:   tlsKeyFile,
+		CreatedAt:    fmt.Sprintf("%d", createdAt),
 	}
 	
 	if wafID != "" {
@@ -1461,16 +1511,32 @@ func createProxyInstance(name string, listenPort int, backend, wafID string) (*P
 
 	log.Printf("启动代理服务器 %s 在端口 %d，后端: %s", instance.Name, instance.ListenPort, instance.Backend)
 	
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", instance.ListenPort))
-	if err != nil {
-		log.Printf("代理服务器 %s 启动失败: %v", instance.Name, err)
-		
-		db.Exec("DELETE FROM proxy_instances WHERE id = ?", instance.ID)
-		proxyMutex.Lock()
-		delete(proxyInstances, instance.ID)
-		proxyMutex.Unlock()
-		
-		return nil, fmt.Errorf("端口 %d 已被占用", instance.ListenPort)
+	var listener net.Listener
+	if instance.TLSEnabled && instance.TLSCertFile != "" && instance.TLSKeyFile != "" {
+		tlsConfig, err := loadTLSConfig(instance.TLSCertFile, instance.TLSKeyFile)
+		if err != nil {
+			log.Printf("代理服务器 %s 加载TLS配置失败: %v", instance.Name, err)
+			return nil, fmt.Errorf("加载TLS配置失败: %v", err)
+		}
+		listener, err = tls.Listen("tcp", fmt.Sprintf(":%d", instance.ListenPort), tlsConfig)
+		if err != nil {
+			log.Printf("代理服务器 %s TLS监听启动失败: %v", instance.Name, err)
+			return nil, fmt.Errorf("TLS监听启动失败: %v", err)
+		}
+		log.Printf("代理服务器 %s HTTPS监听已启动在端口 %d", instance.Name, instance.ListenPort)
+	} else {
+		var err error
+		listener, err = net.Listen("tcp", fmt.Sprintf(":%d", instance.ListenPort))
+		if err != nil {
+			log.Printf("代理服务器 %s 启动失败: %v", instance.Name, err)
+			
+			db.Exec("DELETE FROM proxy_instances WHERE id = ?", instance.ID)
+			proxyMutex.Lock()
+			delete(proxyInstances, instance.ID)
+			proxyMutex.Unlock()
+			
+			return nil, fmt.Errorf("端口 %d 已被占用", instance.ListenPort)
+		}
 	}
 
 	instance.Server = &http.Server{
@@ -2722,16 +2788,17 @@ func loadWAFInstancesFromDB() error {
 }
 
 func loadProxyInstancesFromDB() error {
-	rows, err := db.Query("SELECT id, name, listen_port, backend, waf_id, created_at FROM proxy_instances")
+	rows, err := db.Query("SELECT id, name, listen_port, backend, waf_id, created_at, tls_enabled, tls_cert_file, tls_key_file FROM proxy_instances")
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		var id, name, backend, wafID, createdAt string
+		var id, name, backend, wafID, createdAt, tlsCertFile, tlsKeyFile string
 		var listenPort int
-		err := rows.Scan(&id, &name, &listenPort, &backend, &wafID, &createdAt)
+		var tlsEnabled int
+		err := rows.Scan(&id, &name, &listenPort, &backend, &wafID, &createdAt, &tlsEnabled, &tlsCertFile, &tlsKeyFile)
 		if err != nil {
 			continue
 		}
@@ -2751,13 +2818,16 @@ func loadProxyInstancesFromDB() error {
 		}
 
 		instance := &ProxyInstance{
-			ID:         id,
-			Name:       name,
-			ListenPort: listenPort,
-			Backend:    backend,
-			WAFID:      wafID,
-			Proxy:      proxy,
-			CreatedAt:  createdAt,
+			ID:           id,
+			Name:         name,
+			ListenPort:   listenPort,
+			Backend:      backend,
+			WAFID:        wafID,
+			Proxy:        proxy,
+			TLSEnabled:   tlsEnabled == 1,
+			TLSCertFile:  tlsCertFile,
+			TLSKeyFile:   tlsKeyFile,
+			CreatedAt:    createdAt,
 		}
 
 		if wafID != "" {
@@ -2795,16 +2865,32 @@ func loadProxyInstancesFromDB() error {
 
 		log.Printf("启动代理服务器 %s 在端口 %d，后端: %s", instance.Name, instance.ListenPort, instance.Backend)
 		
-		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", instance.ListenPort))
-		if err != nil {
-			log.Printf("代理服务器 %s 启动失败: %v", instance.Name, err)
-			
-			db.Exec("DELETE FROM proxy_instances WHERE id = ?", instance.ID)
-			proxyMutex.Lock()
-			delete(proxyInstances, instance.ID)
-			proxyMutex.Unlock()
-			
-			continue
+		var listener net.Listener
+		if instance.TLSEnabled && instance.TLSCertFile != "" && instance.TLSKeyFile != "" {
+			tlsConfig, err := loadTLSConfig(instance.TLSCertFile, instance.TLSKeyFile)
+			if err != nil {
+				log.Printf("代理服务器 %s 加载TLS配置失败: %v", instance.Name, err)
+				continue
+			}
+			listener, err = tls.Listen("tcp", fmt.Sprintf(":%d", instance.ListenPort), tlsConfig)
+			if err != nil {
+				log.Printf("代理服务器 %s TLS监听启动失败: %v", instance.Name, err)
+				continue
+			}
+			log.Printf("代理服务器 %s HTTPS监听已启动在端口 %d", instance.Name, instance.ListenPort)
+		} else {
+			var err error
+			listener, err = net.Listen("tcp", fmt.Sprintf(":%d", instance.ListenPort))
+			if err != nil {
+				log.Printf("代理服务器 %s 启动失败: %v", instance.Name, err)
+				
+				db.Exec("DELETE FROM proxy_instances WHERE id = ?", instance.ID)
+				proxyMutex.Lock()
+				delete(proxyInstances, instance.ID)
+				proxyMutex.Unlock()
+				
+				continue
+			}
 		}
 
 		instance.Server = &http.Server{
@@ -2822,6 +2908,16 @@ func loadProxyInstancesFromDB() error {
 	}
 
 	return nil
+}
+
+func loadTLSConfig(certFile, keyFile string) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("证书文件(%s)或密钥文件(%s)无效: %v", certFile, keyFile, err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}, nil
 }
 
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -3006,7 +3102,7 @@ func handleDBVersion(w http.ResponseWriter, r *http.Request) {
 
 func handleDBUpgrade(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	version := getCurrentDBVersion()
 	if version == currentDBVersion {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3015,49 +3111,84 @@ func handleDBUpgrade(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	
-	if version == "1.0" {
-		err := upgradeDBFrom10To11() // 这个函数内部会继续升级到 1.2
-		if err != nil {
-			log.Printf("数据库升级失败: %v", err)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   err.Error(),
-			})
-			return
-		}
-		
+
+	upgradeSteps := getSequentialUpgradeSteps(version)
+	if len(upgradeSteps) == 0 {
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "数据库升级已开始",
-			"version": currentDBVersion,
+			"success": false,
+			"error":   "不支持的数据库版本或已是最新版本",
 		})
 		return
 	}
-	
-	if version == "1.1" {
-		err := upgradeDBFrom11To12()
+
+	go func() {
+		err := performSequentialUpgrade(version, upgradeSteps)
 		if err != nil {
+			setUpgradeError(err.Error())
 			log.Printf("数据库升级失败: %v", err)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   err.Error(),
-			})
-			return
 		}
-		
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "数据库升级已开始",
-			"version": currentDBVersion,
-		})
-		return
-	}
-	
+	}()
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   "不支持的数据库版本",
+		"success": true,
+		"message": "数据库升级已开始",
+		"version": currentDBVersion,
 	})
+}
+
+func getSequentialUpgradeSteps(currentVersion string) []string {
+	var steps []string
+	versions := []string{"1.0", "1.1", "1.2", "1.3"}
+	currentIdx := 0
+	
+	for i, v := range versions {
+		if v == currentVersion {
+			currentIdx = i
+			break
+		}
+	}
+	
+	for i := currentIdx + 1; i < len(versions); i++ {
+		steps = append(steps, versions[i])
+	}
+	
+	return steps
+}
+
+func performSequentialUpgrade(fromVersion string, steps []string) error {
+	initUpgradeProgress()
+
+	currentVersion := fromVersion
+	totalSteps := len(steps)
+
+	for stepIdx, targetVersion := range steps {
+		log.Printf("升级数据库: %s -> %s", currentVersion, targetVersion)
+		updateUpgradeProgress("upgrading", stepIdx, totalSteps, fmt.Sprintf("升级到版本 %s...", targetVersion))
+
+		var err error
+		switch targetVersion {
+		case "1.1":
+			err = upgradeTo11()
+		case "1.2":
+			err = upgradeTo12()
+		case "1.3":
+			err = upgradeTo13()
+		default:
+			err = fmt.Errorf("未知的升级目标版本: %s", targetVersion)
+		}
+
+		if err != nil {
+			return fmt.Errorf("升级到 %s 失败: %w", targetVersion, err)
+		}
+
+		updateUpgradeProgress("upgrading", stepIdx+1, totalSteps, fmt.Sprintf("完成版本 %s", targetVersion))
+		currentVersion = targetVersion
+	}
+
+	updateUpgradeProgress("completed", totalSteps, totalSteps, "所有升级完成")
+	setUpgradeCompleted()
+	log.Printf("数据库升级完成: %s -> %s", fromVersion, currentDBVersion)
+	return nil
 }
 
 func handleDBUpgradeProgress(w http.ResponseWriter, r *http.Request) {
@@ -3488,15 +3619,94 @@ func handleWAFInstance(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusMethodNotAllowed)
 }
 
-func handleProxyInstances(w http.ResponseWriter, r *http.Request) {
+func loadCertificatesFromDB() error {
+	rows, err := db.Query("SELECT id, name, domains, provider, cert_file, key_file, ca_file, expires_at, auto_renew, status, created_at, cloudflare_api_token, cloudflare_email, acme_kid, acme_hmac_key, acme_server_url, acme_email FROM certificates")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id, name, domains, provider, certFile, keyFile, caFile, createdAt, cloudflareAPIToken, cloudflareEmail, acmeKid, acmeHmacKey, acmeServerURL, acmeEmail string
+		var autoRenew int
+		var status string
+		var certFileNull, keyFileNull, caFileNull sql.NullString
+		var expiresAtNull sql.NullInt64
+		err := rows.Scan(&id, &name, &domains, &provider, &certFileNull, &keyFileNull, &caFileNull, &expiresAtNull, &autoRenew, &status, &createdAt, &cloudflareAPIToken, &cloudflareEmail, &acmeKid, &acmeHmacKey, &acmeServerURL, &acmeEmail)
+		if err != nil {
+			log.Printf("加载证书行扫描失败: %v", err)
+			continue
+		}
+
+		if certFileNull.Valid {
+			certFile = certFileNull.String
+		}
+		if keyFileNull.Valid {
+			keyFile = keyFileNull.String
+		}
+		if caFileNull.Valid {
+			caFile = caFileNull.String
+		}
+
+		var expiresAt int64
+		if expiresAtNull.Valid {
+			expiresAt = expiresAtNull.Int64
+		}
+
+		cert := &Certificate{
+			ID:                 id,
+			Name:               name,
+			Domains:            domains,
+			Provider:           provider,
+			CertFile:           certFile,
+			KeyFile:            keyFile,
+			CaFile:             caFile,
+			ExpiresAt:          expiresAt,
+			AutoRenew:          autoRenew == 1,
+			Status:             status,
+			CreatedAt:          createdAt,
+			CloudflareAPIToken: cloudflareAPIToken,
+			CloudflareEmail:    cloudflareEmail,
+			AcmeKid:           acmeKid,
+			AcmeHmacKey:       acmeHmacKey,
+			AcmeServerURL:     acmeServerURL,
+			AcmeEmail:         acmeEmail,
+		}
+		cert.Status = getCertificateStatus(expiresAt)
+
+		certificateMutex.Lock()
+		certificates[id] = cert
+		certificateMutex.Unlock()
+	}
+
+	return nil
+}
+
+func getCertificateStatus(expiresAt int64) string {
+	if expiresAt == 0 {
+		return "pending"
+	}
+	if expiresAt < time.Now().Unix() {
+		return "expired"
+	}
+	return "valid"
+}
+
+func handleCertificates(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	if r.Method == "POST" {
 		var req struct {
-			Name       string `json:"name"`
-			ListenPort int    `json:"listenPort"`
-			Backend    string `json:"backend"`
-			WAFID      string `json:"wafId"`
+			Name              string `json:"name"`
+			Domains           string `json:"domains"`
+			Provider          string `json:"provider"`
+			AutoRenew         bool   `json:"autoRenew"`
+			CloudflareAPIToken string `json:"cloudflareApiToken"`
+			CloudflareEmail    string `json:"cloudflareEmail"`
+			AcmeKid           string `json:"acmeKid"`
+			AcmeHmacKey       string `json:"acmeHmacKey"`
+			AcmeServerURL     string `json:"acmeServerUrl"`
+			AcmeEmail         string `json:"acmeEmail"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -3507,7 +3717,581 @@ func handleProxyInstances(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		instance, err := createProxyInstance(req.Name, req.ListenPort, req.Backend, req.WAFID)
+		id := fmt.Sprintf("cert-%d", time.Now().UnixNano())
+		createdAt := getUTCTimestamp()
+
+		_, err := db.Exec(
+			"INSERT INTO certificates (id, name, domains, provider, auto_renew, status, created_at, cloudflare_api_token, cloudflare_email, acme_kid, acme_hmac_key, acme_server_url, acme_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			id, req.Name, req.Domains, req.Provider, boolToInt(req.AutoRenew), "pending", createdAt, req.CloudflareAPIToken, req.CloudflareEmail, req.AcmeKid, req.AcmeHmacKey, req.AcmeServerURL, req.AcmeEmail,
+		)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "创建证书失败: " + err.Error(),
+			})
+			return
+		}
+
+		cert := &Certificate{
+			ID:                 id,
+			Name:               req.Name,
+			Domains:            req.Domains,
+			Provider:           req.Provider,
+			AutoRenew:          req.AutoRenew,
+			Status:             "pending",
+			CreatedAt:          fmt.Sprintf("%d", createdAt),
+			CloudflareAPIToken: req.CloudflareAPIToken,
+			CloudflareEmail:    req.CloudflareEmail,
+			AcmeKid:           req.AcmeKid,
+			AcmeHmacKey:       req.AcmeHmacKey,
+			AcmeServerURL:     req.AcmeServerURL,
+			AcmeEmail:         req.AcmeEmail,
+		}
+
+		certificateMutex.Lock()
+		certificates[id] = cert
+		certificateMutex.Unlock()
+
+		stopChan := make(chan struct{})
+		certStopChannels.Store(id, stopChan)
+
+		go func() {
+			if err := requestCertificate(cert); err != nil {
+				log.Printf("证书申请失败: %v", err)
+			}
+			certStopChannels.Delete(id)
+		}()
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"cert":    cert,
+			"id":      id,
+		})
+		return
+	}
+
+	certificateMutex.RLock()
+	certs := make([]*Certificate, 0, len(certificates))
+	for _, cert := range certificates {
+		certs = append(certs, cert)
+	}
+	certificateMutex.RUnlock()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":      true,
+		"certificates": certs,
+	})
+}
+
+func handleCertificateLogs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	id := strings.TrimPrefix(r.URL.Path, "/api/certificates/")
+	id = strings.TrimSuffix(id, "/logs")
+
+	logs := getCertLogs(id)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"certId":  id,
+		"logs":    logs,
+	})
+}
+
+func handleCertificate(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	id := strings.TrimPrefix(r.URL.Path, "/api/certificates/")
+
+	if r.Method == "DELETE" {
+		certificateMutex.Lock()
+		cert, exists := certificates[id]
+		certificateMutex.Unlock()
+
+		certFile, keyFile, caFile := "", "", ""
+		if exists && cert != nil {
+			certFile = cert.CertFile
+			keyFile = cert.KeyFile
+			caFile = cert.CaFile
+		}
+
+		_, err := db.Exec("DELETE FROM certificates WHERE id = ?", id)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "删除失败: " + err.Error(),
+			})
+			return
+		}
+
+		certificateMutex.Lock()
+		delete(certificates, id)
+		certificateMutex.Unlock()
+
+		clearCertLogs(id)
+
+		if certFile != "" {
+			os.Remove(certFile)
+		}
+		if keyFile != "" {
+			os.Remove(keyFile)
+		}
+		if caFile != "" {
+			os.Remove(caFile)
+		}
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+		})
+		return
+	}
+
+	if r.Method == "PUT" {
+		var req struct {
+			Name              string `json:"name"`
+			Domains           string `json:"domains"`
+			Provider          string `json:"provider"`
+			AutoRenew         bool   `json:"autoRenew"`
+			CloudflareAPIToken string `json:"cloudflareApiToken"`
+			AcmeEmail         string `json:"acmeEmail"`
+			AcmeKid           string `json:"acmeKid"`
+			AcmeHmacKey       string `json:"acmeHmacKey"`
+			AcmeServerURL     string `json:"acmeServerUrl"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "无效的请求",
+			})
+			return
+		}
+
+		certificateMutex.Lock()
+		cert, exists := certificates[id]
+		if !exists {
+			certificateMutex.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "证书不存在",
+			})
+			return
+		}
+
+		cert.Name = req.Name
+		cert.Domains = req.Domains
+		cert.Provider = req.Provider
+		cert.AutoRenew = req.AutoRenew
+		cert.CloudflareAPIToken = req.CloudflareAPIToken
+		cert.AcmeEmail = req.AcmeEmail
+		cert.AcmeKid = req.AcmeKid
+		cert.AcmeHmacKey = req.AcmeHmacKey
+		cert.AcmeServerURL = req.AcmeServerURL
+		certificateMutex.Unlock()
+
+		_, err := db.Exec("UPDATE certificates SET name = ?, domains = ?, provider = ?, auto_renew = ?, cloudflare_api_token = ?, acme_email = ?, acme_kid = ?, acme_hmac_key = ?, acme_server_url = ? WHERE id = ?",
+			req.Name, req.Domains, req.Provider, boolToInt(req.AutoRenew), req.CloudflareAPIToken, req.AcmeEmail, req.AcmeKid, req.AcmeHmacKey, req.AcmeServerURL, id)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "更新失败: " + err.Error(),
+			})
+			return
+		}
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"cert":    cert,
+		})
+		return
+	}
+
+	w.WriteHeader(http.StatusMethodNotAllowed)
+}
+
+func handleCertificateRenew(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	id := strings.TrimPrefix(r.URL.Path, "/api/certificates/")
+	id = strings.TrimSuffix(id, "/renew")
+
+	certificateMutex.RLock()
+	cert, exists := certificates[id]
+	certificateMutex.RUnlock()
+
+	if !exists {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "证书不存在",
+		})
+		return
+	}
+
+	stopChan := make(chan struct{})
+	certStopChannels.Store(id, stopChan)
+
+	go func() {
+		if err := requestCertificate(cert); err != nil {
+			log.Printf("证书续期失败: %v", err)
+		}
+		certStopChannels.Delete(id)
+	}()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "证书续期请求已提交",
+	})
+}
+
+func handleCertificateStop(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	id := strings.TrimPrefix(r.URL.Path, "/api/certificates/")
+	id = strings.TrimSuffix(id, "/stop")
+
+	if stopChan, exists := certStopChannels.Load(id); exists {
+		close(stopChan.(chan struct{}))
+		certStopChannels.Delete(id)
+
+		certificateMutex.Lock()
+		if cert, ok := certificates[id]; ok {
+			cert.Status = "stopped"
+			db.Exec("UPDATE certificates SET status = ? WHERE id = ?", "stopped", id)
+		}
+		certificateMutex.Unlock()
+
+		addCertLog(id, "证书申请已手动停止")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "证书申请已停止",
+		})
+		return
+	}
+
+	w.WriteHeader(http.StatusNotFound)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": false,
+		"error":   "证书申请不在进行中",
+	})
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func requestCertificate(cert *Certificate) error {
+	addCertLog(cert.ID, "开始申请证书...")
+	domains := strings.Split(cert.Domains, ",")
+	if len(domains) == 0 || domains[0] == "" {
+		return fmt.Errorf("域名列表为空")
+	}
+
+	for i := range domains {
+		domains[i] = strings.TrimSpace(domains[i])
+	}
+
+	certDir := "./data/certs"
+	os.MkdirAll(certDir, 0755)
+
+	keyPath := certDir + "/" + cert.ID + ".key"
+	certPath := certDir + "/" + cert.ID + ".crt"
+	caPath := certDir + "/" + cert.ID + ".ca.crt"
+	accountKeyPath := certDir + "/" + cert.ID + ".account.key"
+
+	accountKey, err := loadOrCreateUserKey(accountKeyPath)
+	if err != nil {
+		addCertLog(cert.ID, fmt.Sprintf("错误: 加载账户密钥失败 - %v", err))
+		return fmt.Errorf("加载账户密钥失败: %v", err)
+	}
+	addCertLog(cert.ID, "账户密钥加载成功")
+
+	certKey, err := loadOrCreateUserKey(keyPath)
+	if err != nil {
+		addCertLog(cert.ID, fmt.Sprintf("错误: 加载证书密钥失败 - %v", err))
+		return fmt.Errorf("加载证书密钥失败: %v", err)
+	}
+	addCertLog(cert.ID, "证书密钥加载成功")
+
+	cloudflarePtr := cert.CloudflareAPIToken
+	if cloudflarePtr == "" {
+		cloudflarePtr = os.Getenv("CF_API_TOKEN")
+	}
+
+	addCertLog(cert.ID, "配置 Cloudflare DNS 提供商...")
+	cloudflareProvider, err := cloudflare.NewDNSProviderConfig(&cloudflare.Config{
+		AuthToken:          cloudflarePtr,
+		TTL:                120,
+		PropagationTimeout: 10 * time.Minute,
+	})
+	if err != nil {
+		addCertLog(cert.ID, fmt.Sprintf("错误: Cloudflare DNS 提供商创建失败 - %v", err))
+		return fmt.Errorf("创建Cloudflare DNS提供商失败: %v", err)
+	}
+	addCertLog(cert.ID, "Cloudflare DNS 提供商创建成功")
+
+	serverURL := cert.AcmeServerURL
+	if serverURL == "" {
+		serverURL = "https://acme-v02.api.letsencrypt.org/directory"
+	}
+	addCertLog(cert.ID, fmt.Sprintf("使用 ACME 服务器: %s", serverURL))
+
+	acmeKid := cert.AcmeKid
+	hmacKey := cert.AcmeHmacKey
+	acmeEmail := cert.AcmeEmail
+
+	user := &acmeUser{
+		Email: acmeEmail,
+		key:   accountKey,
+	}
+
+	config := lego.NewConfig(user)
+	config.CADirURL = serverURL
+	config.Certificate.KeyType = certcrypto.EC384
+
+	client, err := lego.NewClient(config)
+	if err != nil {
+		addCertLog(cert.ID, fmt.Sprintf("错误: ACME 客户端创建失败 - %v", err))
+		return fmt.Errorf("创建ACME客户端失败: %v", err)
+	}
+
+	err = client.Challenge.SetDNS01Provider(cloudflareProvider)
+	if err != nil {
+		addCertLog(cert.ID, fmt.Sprintf("错误: 设置 DNS 提供商失败 - %v", err))
+		return fmt.Errorf("设置DNS提供商失败: %v", err)
+	}
+
+	addCertLog(cert.ID, "正在注册 ACME 账户...")
+	if acmeKid == "" || hmacKey == "" {
+		reg, err := client.Registration.Register(registration.RegisterOptions{
+			TermsOfServiceAgreed: true,
+		})
+		if err != nil {
+			addCertLog(cert.ID, fmt.Sprintf("错误: ACME 账户注册失败 - %v", err))
+			return fmt.Errorf("注册ACME账户失败: %v", err)
+		}
+		user.Registration = reg
+		cert.AcmeKid = reg.URI
+		db.Exec("UPDATE certificates SET acme_kid = ?, acme_server_url = ? WHERE id = ?",
+			reg.URI, serverURL, cert.ID)
+		addCertLog(cert.ID, fmt.Sprintf("ACME 账户注册成功，Kid: %s", reg.URI))
+	} else {
+		reg, err := client.Registration.RegisterWithExternalAccountBinding(registration.RegisterEABOptions{
+			TermsOfServiceAgreed: true,
+			Kid:          acmeKid,
+			HmacEncoded:  hmacKey,
+		})
+		if err != nil {
+			addCertLog(cert.ID, fmt.Sprintf("错误: EAB 注册失败 - %v", err))
+			return fmt.Errorf("使用EAB注册ACME账户失败: %v", err)
+		}
+		user.Registration = reg
+		cert.AcmeKid = reg.URI
+		db.Exec("UPDATE certificates SET acme_kid = ?, acme_server_url = ? WHERE id = ?",
+			reg.URI, serverURL, cert.ID)
+		addCertLog(cert.ID, fmt.Sprintf("EAB 注册成功，Kid: %s", reg.URI))
+	}
+
+	addCertLog(cert.ID, fmt.Sprintf("正在申请证书，域名: %v", domains))
+	addCertLog(cert.ID, "等待 DNS 记录传播（请耐心等待，不要关闭程序）...")
+
+	csrTemplate := &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: domains[0]},
+		DNSNames: domains,
+	}
+	csrBytes, err := x509.CreateCertificateRequest(rand.Reader, csrTemplate, certKey)
+	if err != nil {
+		addCertLog(cert.ID, fmt.Sprintf("错误: 生成 CSR 失败 - %v", err))
+		return fmt.Errorf("生成CSR失败: %v", err)
+	}
+
+	pemCsr := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
+	block, _ := pem.Decode(pemCsr)
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		addCertLog(cert.ID, fmt.Sprintf("错误: 解析 CSR 失败 - %v", err))
+		return fmt.Errorf("解析CSR失败: %v", err)
+	}
+
+	request := certificate.ObtainForCSRRequest{
+		CSR:    csr,
+		Bundle: true,
+	}
+
+	certRes, err := client.Certificate.ObtainForCSR(request)
+	if err != nil {
+		addCertLog(cert.ID, fmt.Sprintf("错误: 证书申请失败 - %v", err))
+		return fmt.Errorf("申请证书失败: %v", err)
+	}
+	addCertLog(cert.ID, "证书申请成功，正在保存...")
+
+	keyBytes, err := x509.MarshalECPrivateKey(certKey.(*ecdsa.PrivateKey))
+	if err != nil {
+		addCertLog(cert.ID, fmt.Sprintf("错误: 序列化私钥失败 - %v", err))
+		return fmt.Errorf("序列化私钥失败: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
+	ioutil.WriteFile(keyPath, keyPEM, 0600)
+
+	certBytes := certRes.Certificate
+	if !bytes.HasPrefix(certBytes, []byte("-----BEGIN")) {
+		certBytes = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certBytes})
+	}
+	ioutil.WriteFile(certPath, certBytes, 0644)
+
+	if len(certRes.IssuerCertificate) > 0 {
+		caBytes := certRes.IssuerCertificate
+		if !bytes.HasPrefix(caBytes, []byte("-----BEGIN")) {
+			caBytes = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caBytes})
+		}
+		ioutil.WriteFile(caPath, caBytes, 0644)
+	}
+
+	expiresAt := time.Now().AddDate(0, 0, 89).Unix()
+
+	certificateMutex.Lock()
+	cert.CertFile = certPath
+	cert.KeyFile = keyPath
+	cert.CaFile = caPath
+	cert.ExpiresAt = expiresAt
+	cert.Status = "valid"
+	certificateMutex.Unlock()
+
+	db.Exec("UPDATE certificates SET cert_file = ?, key_file = ?, ca_file = ?, expires_at = ?, status = ? WHERE id = ?",
+		certPath, keyPath, caPath, expiresAt, "valid", cert.ID)
+
+	updateProxyCertificates(certPath, keyPath)
+
+	addCertLog(cert.ID, fmt.Sprintf("证书申请完成! 到期时间: %s", time.Unix(expiresAt, 0).Format("2006-01-02")))
+	log.Printf("证书申请成功: %s, 到期时间: %s", cert.Name, time.Unix(expiresAt, 0).Format("2006-01-02"))
+	return nil
+}
+
+type acmeUser struct {
+	Email        string
+	Registration *registration.Resource
+	key          crypto.PrivateKey
+}
+
+func (u *acmeUser) GetEmail() string {
+	return u.Email
+}
+
+func (u *acmeUser) GetRegistration() *registration.Resource {
+	return u.Registration
+}
+
+func (u *acmeUser) GetPrivateKey() crypto.PrivateKey {
+	return u.key
+}
+
+func loadOrCreateUserKey(keyPath string) (crypto.PrivateKey, error) {
+	if _, err := os.Stat(keyPath); err == nil {
+		data, err := ioutil.ReadFile(keyPath)
+		if err != nil {
+			return nil, err
+		}
+		return parsePrivateKey(data)
+	}
+
+	privateKey, err := generatePrivateKey()
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := x509.MarshalECPrivateKey(privateKey)
+	if err != nil {
+		return nil, err
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: data})
+	ioutil.WriteFile(keyPath, keyPEM, 0600)
+	return privateKey, nil
+}
+
+func generatePrivateKey() (*ecdsa.PrivateKey, error) {
+	return ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+}
+
+func parsePrivateKey(keyBytes []byte) (crypto.PrivateKey, error) {
+	block, _ := pem.Decode(keyBytes)
+	if block == nil {
+		return nil, fmt.Errorf("无法解析PEM格式私钥")
+	}
+	return x509.ParseECPrivateKey(block.Bytes)
+}
+
+func updateProxyCertificates(certFile, keyFile string) {
+	proxyMutex.RLock()
+	defer proxyMutex.RUnlock()
+
+	for _, inst := range proxyInstances {
+		if inst.TLSEnabled {
+			inst.TLSCertFile = certFile
+			inst.TLSKeyFile = keyFile
+
+			db.Exec("UPDATE proxy_instances SET tls_cert_file = ?, tls_key_file = ? WHERE id = ?",
+				certFile, keyFile, inst.ID)
+
+			log.Printf("更新代理 %s 的证书为: %s", inst.Name, certFile)
+		}
+	}
+}
+
+func startCertificateAutoRenewal() {
+	ticker := time.NewTicker(1 * time.Hour)
+	go func() {
+		for range ticker.C {
+			certificateMutex.RLock()
+			for _, cert := range certificates {
+				if cert.AutoRenew && cert.ExpiresAt > 0 {
+					daysUntilExpiry := (cert.ExpiresAt - time.Now().Unix()) / 86400
+					if daysUntilExpiry <= 7 {
+						go func() {
+							if err := requestCertificate(cert); err != nil {
+								log.Printf("自动续期失败: %v", err)
+							} else {
+								log.Printf("证书 %s 自动续期成功", cert.Name)
+							}
+						}()
+					}
+				}
+			}
+			certificateMutex.RUnlock()
+		}
+	}()
+}
+
+func handleProxyInstances(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "POST" {
+		var req struct {
+			Name       string `json:"name"`
+			ListenPort int    `json:"listenPort"`
+			Backend    string `json:"backend"`
+			WAFID      string `json:"wafId"`
+			TLSEnabled bool   `json:"tlsEnabled"`
+			TLSCertFile string `json:"tlsCertFile"`
+			TLSKeyFile  string `json:"tlsKeyFile"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "无效的请求",
+			})
+			return
+		}
+
+		instance, err := createProxyInstance(req.Name, req.ListenPort, req.Backend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile)
 		if err != nil {
 			log.Printf("创建防护应用失败: %v", err)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -3553,10 +4337,13 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == "PUT" {
 		var req struct {
-			Name       string `json:"name"`
-			ListenPort int    `json:"listenPort"`
-			Backend    string `json:"backend"`
-			WAFID      string `json:"wafId"`
+			Name         string `json:"name"`
+			ListenPort   int    `json:"listenPort"`
+			Backend      string `json:"backend"`
+			WAFID        string `json:"wafId"`
+			TLSEnabled   bool   `json:"tlsEnabled"`
+			TLSCertFile  string `json:"tlsCertFile"`
+			TLSKeyFile   string `json:"tlsKeyFile"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -3593,6 +4380,9 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 		oldWAFID := instance.WAFID
 		oldBackend := instance.Backend
 		oldName := instance.Name
+		oldTLSEnabled := instance.TLSEnabled
+		oldTLSCertFile := instance.TLSCertFile
+		oldTLSKeyFile := instance.TLSKeyFile
 
 		targetURL, err := url.Parse(req.Backend)
 		if err != nil {
@@ -3622,11 +4412,11 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 			wafMutex.RUnlock()
 		}
 
-		if oldPort == req.ListenPort && oldWAFID == req.WAFID && req.Backend == oldBackend && req.Name == oldName {
+		if oldPort == req.ListenPort && oldWAFID == req.WAFID && req.Backend == oldBackend && req.Name == oldName && oldTLSEnabled == req.TLSEnabled && oldTLSCertFile == req.TLSCertFile && oldTLSKeyFile == req.TLSKeyFile {
 			log.Printf("更新代理服务器 %s: 无需重启", instance.Name)
-			
-			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, waf_id = ? WHERE id = ?", 
-				req.Name, req.ListenPort, req.Backend, req.WAFID, id)
+
+			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, waf_id = ?, tls_enabled = ?, tls_cert_file = ?, tls_key_file = ? WHERE id = ?",
+				req.Name, req.ListenPort, req.Backend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, id)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3639,6 +4429,9 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 			instance.Name = req.Name
 			instance.Backend = req.Backend
 			instance.WAFID = req.WAFID
+			instance.TLSEnabled = req.TLSEnabled
+			instance.TLSCertFile = req.TLSCertFile
+			instance.TLSKeyFile = req.TLSKeyFile
 			instance.Proxy = proxy
 			
 			if req.WAFID != "" {
@@ -3660,18 +4453,8 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 				time.Sleep(600 * time.Millisecond)
 			}
 
-			listener, err := net.Listen("tcp", fmt.Sprintf(":%d", instance.ListenPort))
-			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"error":   "端口 " + fmt.Sprintf("%d", instance.ListenPort) + " 已被占用",
-				})
-				return
-			}
-
-			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, waf_id = ? WHERE id = ?", 
-				req.Name, req.ListenPort, req.Backend, req.WAFID, id)
+			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, waf_id = ?, tls_enabled = ?, tls_cert_file = ?, tls_key_file = ? WHERE id = ?",
+				req.Name, req.ListenPort, req.Backend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, id)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3684,6 +4467,9 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 			instance.Name = req.Name
 			instance.Backend = req.Backend
 			instance.WAFID = req.WAFID
+			instance.TLSEnabled = req.TLSEnabled
+			instance.TLSCertFile = req.TLSCertFile
+			instance.TLSKeyFile = req.TLSKeyFile
 			instance.Proxy = proxy
 			
 			if req.WAFID != "" {
@@ -3702,6 +4488,42 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 				Handler: handler,
 			}
 
+			var listener net.Listener
+			if req.TLSEnabled && req.TLSCertFile != "" && req.TLSKeyFile != "" {
+				tlsConfig, err := loadTLSConfig(req.TLSCertFile, req.TLSKeyFile)
+				if err != nil {
+					log.Printf("代理服务器 %s 加载TLS配置失败: %v", instance.Name, err)
+					w.WriteHeader(http.StatusInternalServerError)
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"success": false,
+						"error":   "加载TLS配置失败: " + err.Error(),
+					})
+					return
+				}
+				listener, err = tls.Listen("tcp", fmt.Sprintf(":%d", instance.ListenPort), tlsConfig)
+				if err != nil {
+					log.Printf("代理服务器 %s TLS监听失败: %v", instance.Name, err)
+					w.WriteHeader(http.StatusInternalServerError)
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"success": false,
+						"error":   "TLS监听失败: " + err.Error(),
+					})
+					return
+				}
+				log.Printf("代理服务器 %s 启用HTTPS", instance.Name)
+			} else {
+				var err error
+				listener, err = net.Listen("tcp", fmt.Sprintf(":%d", instance.ListenPort))
+				if err != nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"success": false,
+						"error":   "端口 " + fmt.Sprintf("%d", instance.ListenPort) + " 已被占用",
+					})
+					return
+				}
+			}
+
 			go func() {
 				time.Sleep(500 * time.Millisecond)
 				if err := instance.Server.Serve(listener); err != nil && err != http.ErrServerClosed {
@@ -3711,7 +4533,7 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 				}
 			}()
 
-			log.Printf("更新代理服务器 %s: 端口 %d (未变化), WAF: %s -> %s", instance.Name, oldPort, oldWAFID, instance.WAFID)
+			log.Printf("更新代理服务器 %s: 端口 %d (未变化), TLS: %v", instance.Name, oldPort, req.TLSEnabled)
 		} else {
 			if instance.Server != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -3720,18 +4542,44 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 				time.Sleep(600 * time.Millisecond)
 			}
 
-			listener, err := net.Listen("tcp", fmt.Sprintf(":%d", instance.ListenPort))
-			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"error":   "端口 " + fmt.Sprintf("%d", instance.ListenPort) + " 已被占用",
-				})
-				return
+			var listener net.Listener
+			if req.TLSEnabled && req.TLSCertFile != "" && req.TLSKeyFile != "" {
+				tlsConfig, err := loadTLSConfig(req.TLSCertFile, req.TLSKeyFile)
+				if err != nil {
+					log.Printf("代理服务器 %s 加载TLS配置失败: %v", req.Name, err)
+					w.WriteHeader(http.StatusInternalServerError)
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"success": false,
+						"error":   "加载TLS配置失败: " + err.Error(),
+					})
+					return
+				}
+				listener, err = tls.Listen("tcp", fmt.Sprintf(":%d", req.ListenPort), tlsConfig)
+				if err != nil {
+					log.Printf("代理服务器 %s TLS监听失败: %v", req.Name, err)
+					w.WriteHeader(http.StatusInternalServerError)
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"success": false,
+						"error":   "TLS监听失败: " + err.Error(),
+					})
+					return
+				}
+				log.Printf("代理服务器 %s 启用HTTPS", req.Name)
+			} else {
+				var err error
+				listener, err = net.Listen("tcp", fmt.Sprintf(":%d", req.ListenPort))
+				if err != nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"success": false,
+						"error":   "端口 " + fmt.Sprintf("%d", req.ListenPort) + " 已被占用",
+					})
+					return
+				}
 			}
 
-			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, waf_id = ? WHERE id = ?", 
-				req.Name, req.ListenPort, req.Backend, req.WAFID, id)
+			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, waf_id = ?, tls_enabled = ?, tls_cert_file = ?, tls_key_file = ? WHERE id = ?",
+				req.Name, req.ListenPort, req.Backend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, id)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3745,6 +4593,9 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 			instance.ListenPort = req.ListenPort
 			instance.Backend = req.Backend
 			instance.WAFID = req.WAFID
+			instance.TLSEnabled = req.TLSEnabled
+			instance.TLSCertFile = req.TLSCertFile
+			instance.TLSKeyFile = req.TLSKeyFile
 			instance.Proxy = proxy
 			
 			if req.WAFID != "" {
@@ -6295,6 +7146,38 @@ func main() {
 			handleProxyInstance(w, r)
 		}
 	})
+	mux.HandleFunc("/api/certificates", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			readOnlyMiddleware(handleCertificates)(w, r)
+		} else {
+			handleCertificates(w, r)
+		}
+	})
+	mux.HandleFunc("/api/certificates/", func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if strings.HasSuffix(path, "/renew") {
+			if r.Method == "POST" {
+				readOnlyMiddleware(handleCertificateRenew)(w, r)
+			} else {
+				handleCertificateRenew(w, r)
+			}
+		} else if strings.HasSuffix(path, "/stop") {
+			if r.Method == "POST" {
+				readOnlyMiddleware(handleCertificateStop)(w, r)
+			} else {
+				handleCertificateStop(w, r)
+			}
+		} else if strings.HasSuffix(path, "/logs") {
+			handleCertificateLogs(w, r)
+		} else {
+			if r.Method == "PUT" || r.Method == "DELETE" {
+				readOnlyMiddleware(handleCertificate)(w, r)
+			} else {
+				handleCertificate(w, r)
+			}
+		}
+	})
+	mux.HandleFunc("/api/certificates/*/logs", handleCertificateLogs)
 	mux.HandleFunc("/api/port-forward-instances", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" {
 			readOnlyMiddleware(handlePortForwardInstances)(w, r)
@@ -6426,6 +7309,13 @@ func main() {
 	if err != nil {
 		log.Printf("加载端口转发实例失败: %v", err)
 	}
+
+	err = loadCertificatesFromDB()
+	if err != nil {
+		log.Printf("加载证书实例失败: %v", err)
+	}
+
+	startCertificateAutoRenewal()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
