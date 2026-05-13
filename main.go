@@ -2795,12 +2795,23 @@ func loadProxyInstancesFromDB() error {
 	defer rows.Close()
 
 	for rows.Next() {
-		var id, name, backend, wafID, createdAt, tlsCertFile, tlsKeyFile string
+		var id, name, backend, wafID, createdAt string
 		var listenPort int
 		var tlsEnabled int
-		err := rows.Scan(&id, &name, &listenPort, &backend, &wafID, &createdAt, &tlsEnabled, &tlsCertFile, &tlsKeyFile)
+		var tlsCertFileNull, tlsKeyFileNull sql.NullString
+		err := rows.Scan(&id, &name, &listenPort, &backend, &wafID, &createdAt, &tlsEnabled, &tlsCertFileNull, &tlsKeyFileNull)
 		if err != nil {
+			log.Printf("加载代理实例失败: %v", err)
 			continue
+		}
+
+		tlsCertFile := ""
+		if tlsCertFileNull.Valid {
+			tlsCertFile = tlsCertFileNull.String
+		}
+		tlsKeyFile := ""
+		if tlsKeyFileNull.Valid {
+			tlsKeyFile = tlsKeyFileNull.String
 		}
 
 		targetURL, err := url.Parse(backend)
