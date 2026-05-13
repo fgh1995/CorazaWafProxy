@@ -47,8 +47,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.3-beta"
-const localVersionInt = 4030// 版本整数值，用于对比
+const frontendVersion = "v0.4.4"
+const localVersionInt = 4040// 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
@@ -180,7 +180,7 @@ func getUTCTimestamp() int64 {
 	return time.Now().UTC().Unix()
 }
 
-const currentDBVersion = "1.3"
+const currentDBVersion = "1.4"
 
 func getCurrentDBVersion() string {
 	var version string
@@ -192,7 +192,11 @@ func getCurrentDBVersion() string {
 }
 
 func setDBVersion(version string) error {
-	_, err := db.Exec("INSERT INTO db_version (version, updated_at) VALUES (?, ?)", version, getUTCTimestamp())
+	_, err := db.Exec("DELETE FROM db_version")
+	if err != nil && !strings.Contains(err.Error(), "no such table") {
+		return err
+	}
+	_, err = db.Exec("INSERT INTO db_version (version, updated_at) VALUES (?, ?)", version, getUTCTimestamp())
 	return err
 }
 
@@ -504,6 +508,115 @@ func upgradeTo13() error {
 	return nil
 }
 
+func upgradeTo14() error {
+	log.Println("升级到版本 1.4...")
+	updateUpgradeProgress("upgrading", 0, 5, "创建域名规则表 proxy_domain_rules...")
+
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS proxy_domain_rules (
+		id TEXT PRIMARY KEY,
+		proxy_id TEXT NOT NULL,
+		domain TEXT NOT NULL,
+		backend TEXT NOT NULL,
+		is_default INTEGER DEFAULT 0,
+		rule_type TEXT DEFAULT 'proxy',
+		redirect_url TEXT,
+		created_at INTEGER NOT NULL,
+		FOREIGN KEY (proxy_id) REFERENCES proxy_instances(id) ON DELETE CASCADE
+	)`)
+	if err != nil {
+		log.Printf("创建 proxy_domain_rules 表失败: %v", err)
+		return err
+	}
+	log.Println("proxy_domain_rules 表已创建")
+
+	updateUpgradeProgress("upgrading", 1, 5, "添加 fallback_backend 字段到 proxy_instances...")
+	_, err = db.Exec("ALTER TABLE proxy_instances ADD COLUMN fallback_backend TEXT")
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		log.Printf("添加 fallback_backend 字段失败: %v", err)
+		return err
+	}
+	log.Println("fallback_backend 字段已添加/已存在")
+
+	updateUpgradeProgress("upgrading", 2, 5, "添加 rule_type 字段到域名规则...")
+	_, err = db.Exec("ALTER TABLE proxy_domain_rules ADD COLUMN rule_type TEXT DEFAULT 'proxy'")
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		log.Printf("添加 rule_type 字段失败: %v", err)
+		return err
+	}
+	log.Println("rule_type 字段已添加/已存在")
+
+	updateUpgradeProgress("upgrading", 3, 5, "添加 redirect_url 字段到域名规则...")
+	_, err = db.Exec("ALTER TABLE proxy_domain_rules ADD COLUMN redirect_url TEXT")
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		log.Printf("添加 redirect_url 字段失败: %v", err)
+		return err
+	}
+	log.Println("redirect_url 字段已添加/已存在")
+
+	updateUpgradeProgress("upgrading", 4, 5, "迁移现有后端到默认后端...")
+	_, err = db.Exec("UPDATE proxy_instances SET fallback_backend = backend WHERE fallback_backend IS NULL OR fallback_backend = ''")
+	if err != nil {
+		log.Printf("迁移后端数据失败: %v", err)
+		return err
+	}
+	log.Println("现有后端数据已迁移到默认后端")
+
+	updateUpgradeProgress("upgrading", 5, 6, "为现有防护实例创建默认规则...")
+	rows, err := db.Query("SELECT id, fallback_backend FROM proxy_instances WHERE fallback_backend IS NOT NULL AND fallback_backend != ''")
+	if err != nil {
+		log.Printf("查询现有防护实例失败: %v", err)
+		return err
+	}
+	defer rows.Close()
+
+	createdAt := time.Now().UnixMilli()
+	for rows.Next() {
+		var id, fallbackBackend string
+		if err := rows.Scan(&id, &fallbackBackend); err != nil {
+			log.Printf("扫描防护实例失败: %v", err)
+			continue
+		}
+
+		checkStmt := "SELECT COUNT(*) FROM proxy_domain_rules WHERE proxy_id = ? AND is_default = 1"
+		var count int
+		if err := db.QueryRow(checkStmt, id).Scan(&count); err != nil {
+			log.Printf("检查默认规则失败: %v", err)
+			continue
+		}
+
+		if count == 0 {
+			ruleId := fmt.Sprintf("default-rule-%d-%s", time.Now().UnixNano(), id[:8])
+			_, err := db.Exec(
+				"INSERT INTO proxy_domain_rules (id, proxy_id, domain, backend, is_default, rule_type, created_at) VALUES (?, ?, '', ?, 1, 'proxy', ?)",
+				ruleId, id, fallbackBackend, createdAt,
+			)
+			if err != nil {
+				log.Printf("创建默认规则失败: %v", err)
+				continue
+			}
+			log.Printf("为防护实例 %s 创建默认规则: %s", id, fallbackBackend)
+		}
+	}
+	log.Println("默认规则创建完成")
+
+	updateUpgradeProgress("finalizing", 6, 6, "更新数据库版本...")
+	_, err = db.Exec("DELETE FROM db_version")
+	if err != nil && !strings.Contains(err.Error(), "no such table") {
+		log.Printf("清理旧版本记录失败: %v", err)
+	}
+	_, err = db.Exec("DELETE FROM sqlite_sequence WHERE name='db_version'")
+	if err != nil {
+		log.Printf("重置自增序列失败(忽略): %v", err)
+	}
+	err = setDBVersion("1.4")
+	if err != nil {
+		return fmt.Errorf("更新数据库版本失败: %w", err)
+	}
+
+	log.Println("升级到 1.4 完成")
+	return nil
+}
+
 type User struct {
 	ID       int    `json:"id"`
 	Username string `json:"username"`
@@ -521,18 +634,31 @@ type WAFInstance struct {
 }
 
 type ProxyInstance struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	ListenPort    int    `json:"listenPort"`
-	Backend       string `json:"backend"`
-	WAFID         string `json:"wafId"`
-	WAFName       string `json:"wafName,omitempty"`
-	Proxy         *httputil.ReverseProxy `json:"-"`
-	Server        *http.Server `json:"-"`
-	TLSEnabled    bool   `json:"tlsEnabled"`
-	TLSCertFile   string `json:"tlsCertFile"`
-	TLSKeyFile    string `json:"tlsKeyFile"`
-	CreatedAt     string `json:"createdAt"`
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	ListenPort       int    `json:"listenPort"`
+	Backend          string `json:"backend"`
+	FallbackBackend  string `json:"fallbackBackend"`
+	WAFID            string `json:"wafId"`
+	WAFName          string `json:"wafName,omitempty"`
+	Proxy            *httputil.ReverseProxy `json:"-"`
+	Server           *http.Server `json:"-"`
+	TLSEnabled       bool     `json:"tlsEnabled"`
+	TLSCertFile      string   `json:"tlsCertFile"`
+	TLSKeyFile       string   `json:"tlsKeyFile"`
+	DomainRules      []*DomainRule `json:"domainRules"`
+	CreatedAt        string `json:"createdAt"`
+}
+
+type DomainRule struct {
+	ID          string `json:"id"`
+	ProxyID     string `json:"proxyId"`
+	Domain      string `json:"domain"`
+	Backend     string `json:"backend"`
+	IsDefault   bool   `json:"isDefault"`
+	RuleType    string `json:"ruleType"`
+	RedirectURL string `json:"redirectUrl"`
+	CreatedAt   string `json:"createdAt"`
 }
 
 type Certificate struct {
@@ -1410,7 +1536,7 @@ func createWAFInstance(name, mode string, rules []string) (*WAFInstance, error) 
 	return instance, nil
 }
 
-func createProxyInstance(name string, listenPort int, backend, wafID string, tlsEnabled bool, tlsCertFile, tlsKeyFile string) (*ProxyInstance, error) {
+func createProxyInstance(name string, listenPort int, backend, wafID string, tlsEnabled bool, tlsCertFile, tlsKeyFile string, fallbackBackend string) (*ProxyInstance, error) {
 	if listenPort == adminPort {
 		return nil, fmt.Errorf("端口 %d 与管理服务端口冲突", listenPort)
 	}
@@ -1456,24 +1582,26 @@ func createProxyInstance(name string, listenPort int, backend, wafID string, tls
 	}
 
 	_, err = db.Exec(
-		"INSERT INTO proxy_instances (id, name, listen_port, backend, waf_id, created_at, tls_enabled, tls_cert_file, tls_key_file) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		id, name, listenPort, backend, wafID, createdAt, tlsEnabledInt, tlsCertFile, tlsKeyFile,
+		"INSERT INTO proxy_instances (id, name, listen_port, backend, fallback_backend, waf_id, created_at, tls_enabled, tls_cert_file, tls_key_file) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		id, name, listenPort, backend, fallbackBackend, wafID, createdAt, tlsEnabledInt, tlsCertFile, tlsKeyFile,
 	)
 	if err != nil {
 		return nil, err
 	}
 
 	instance := &ProxyInstance{
-		ID:           id,
-		Name:         name,
-		ListenPort:   listenPort,
-		Backend:      backend,
-		WAFID:        wafID,
-		Proxy:        proxy,
-		TLSEnabled:   tlsEnabled,
-		TLSCertFile:  tlsCertFile,
-		TLSKeyFile:   tlsKeyFile,
-		CreatedAt:    fmt.Sprintf("%d", createdAt),
+		ID:              id,
+		Name:            name,
+		ListenPort:      listenPort,
+		Backend:         backend,
+		FallbackBackend: fallbackBackend,
+		WAFID:           wafID,
+		Proxy:           proxy,
+		TLSEnabled:      tlsEnabled,
+		TLSCertFile:     tlsCertFile,
+		TLSKeyFile:      tlsKeyFile,
+		DomainRules:     []*DomainRule{},
+		CreatedAt:       fmt.Sprintf("%d", createdAt),
 	}
 	
 	if wafID != "" {
@@ -1483,6 +1611,14 @@ func createProxyInstance(name string, listenPort int, backend, wafID string, tls
 		}
 		wafMutex.RUnlock()
 	}
+
+	defaultRuleID := fmt.Sprintf("dr-%d", time.Now().UnixNano())
+	_, err = db.Exec("INSERT INTO proxy_domain_rules (id, proxy_id, domain, backend, is_default, rule_type, redirect_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		defaultRuleID, id, "", "", 1, "close", "", createdAt)
+	if err != nil {
+		log.Printf("创建默认关闭规则失败: %v", err)
+	}
+	instance.DomainRules = loadDomainRules(id)
 
 	proxyMutex.Lock()
 	proxyInstances[id] = instance
@@ -1896,13 +2032,50 @@ func (ic *ipCheckHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	
 	var instanceName string
 	var forwardInfo string
+	var domainRules []*DomainRule
+	var matchedRule *DomainRule
 	if ic.proxyID != "" {
 		proxyMutex.RLock()
 		if proxy, exists := proxyInstances[ic.proxyID]; exists {
 			instanceName = proxy.Name
-			forwardInfo = fmt.Sprintf("http://%d -> %s", proxy.ListenPort, proxy.Backend)
+			domainRules = proxy.DomainRules
+			host := r.Host
+			if idx := strings.Index(host, ":"); idx != -1 {
+				host = host[:idx]
+			}
+			matchedRule = proxy.findBackendByDomain(host)
+			forwardInfo = fmt.Sprintf("http://%d -> %s", proxy.ListenPort, matchedRule.Backend)
 		}
 		proxyMutex.RUnlock()
+	}
+
+	if matchedRule != nil && len(domainRules) > 0 {
+		switch matchedRule.RuleType {
+		case "redirect":
+			log.Printf("[域名路由] 执行重定向: %s -> %s", r.Host, matchedRule.RedirectURL)
+			http.Redirect(w, r, matchedRule.RedirectURL, http.StatusTemporaryRedirect)
+			return
+		case "close":
+			log.Printf("[域名路由] 关闭连接: %s", r.Host)
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				conn.Close()
+			}
+			return
+		default:
+			proxy, err := url.Parse(matchedRule.Backend)
+			if err == nil {
+				rp := httputil.NewSingleHostReverseProxy(proxy)
+				rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+					log.Printf("域名路由代理错误: %v", err)
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					w.WriteHeader(http.StatusBadGateway)
+					http.ServeFile(w, r, "web/html/502.html")
+				}
+				rp.ServeHTTP(w, r)
+				return
+			}
+		}
 	}
 	
 	// 构建完整的URL
@@ -2787,19 +2960,89 @@ func loadWAFInstancesFromDB() error {
 	return nil
 }
 
+func loadDomainRules(proxyID string) []*DomainRule {
+	var rules []*DomainRule
+	rows, err := db.Query("SELECT id, proxy_id, domain, backend, is_default, rule_type, redirect_url, created_at FROM proxy_domain_rules WHERE proxy_id = ?", proxyID)
+	if err != nil {
+		log.Printf("加载域名规则失败: %v", err)
+		return rules
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var rule DomainRule
+		var isDefault int
+		var ruleType, redirectURL sql.NullString
+		err := rows.Scan(&rule.ID, &rule.ProxyID, &rule.Domain, &rule.Backend, &isDefault, &ruleType, &redirectURL, &rule.CreatedAt)
+		if err != nil {
+			log.Printf("扫描域名规则失败: %v", err)
+			continue
+		}
+		rule.IsDefault = isDefault == 1
+		if ruleType.Valid {
+			rule.RuleType = ruleType.String
+		} else {
+			rule.RuleType = "proxy"
+		}
+		if redirectURL.Valid {
+			rule.RedirectURL = redirectURL.String
+		}
+		rules = append(rules, &rule)
+	}
+	return rules
+}
+
+func (p *ProxyInstance) findBackendByDomain(host string) *DomainRule {
+	log.Printf("[域名路由] 查找后端: host=%s, 规则数=%d", host, len(p.DomainRules))
+	
+	var defaultRule *DomainRule
+	
+	for _, rule := range p.DomainRules {
+		if rule.IsDefault {
+			defaultRule = rule
+			continue
+		}
+		
+		domains := strings.Split(rule.Domain, "\n")
+		for _, d := range domains {
+			d = strings.TrimSpace(d)
+			if d == "" {
+				continue
+			}
+			log.Printf("[域名路由] 检查规则: domain=%s, backend=%s, ruleType=%s", d, rule.Backend, rule.RuleType)
+			if d == host {
+				log.Printf("[域名路由] 匹配成功: %s -> %s (type: %s)", host, rule.Backend, rule.RuleType)
+				return rule
+			}
+		}
+	}
+	
+	log.Printf("[域名路由] 未匹配到规则，使用默认规则")
+	
+	if defaultRule != nil {
+		log.Printf("[域名路由] 使用默认规则: type=%s, backend=%s", defaultRule.RuleType, defaultRule.Backend)
+		return defaultRule
+	}
+	
+	if p.FallbackBackend != "" {
+		return &DomainRule{Backend: p.FallbackBackend, RuleType: "proxy"}
+	}
+	return &DomainRule{Backend: p.Backend, RuleType: "proxy"}
+}
+
 func loadProxyInstancesFromDB() error {
-	rows, err := db.Query("SELECT id, name, listen_port, backend, waf_id, created_at, tls_enabled, tls_cert_file, tls_key_file FROM proxy_instances")
+	rows, err := db.Query("SELECT id, name, listen_port, backend, fallback_backend, waf_id, created_at, tls_enabled, tls_cert_file, tls_key_file FROM proxy_instances")
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		var id, name, backend, wafID, createdAt string
+		var id, name, backend, createdAt string
 		var listenPort int
 		var tlsEnabled int
-		var tlsCertFileNull, tlsKeyFileNull sql.NullString
-		err := rows.Scan(&id, &name, &listenPort, &backend, &wafID, &createdAt, &tlsEnabled, &tlsCertFileNull, &tlsKeyFileNull)
+		var tlsCertFileNull, tlsKeyFileNull, wafIDNull, fallbackBackendNull sql.NullString
+		err := rows.Scan(&id, &name, &listenPort, &backend, &fallbackBackendNull, &wafIDNull, &createdAt, &tlsEnabled, &tlsCertFileNull, &tlsKeyFileNull)
 		if err != nil {
 			log.Printf("加载代理实例失败: %v", err)
 			continue
@@ -2812,6 +3055,14 @@ func loadProxyInstancesFromDB() error {
 		tlsKeyFile := ""
 		if tlsKeyFileNull.Valid {
 			tlsKeyFile = tlsKeyFileNull.String
+		}
+		wafID := ""
+		if wafIDNull.Valid {
+			wafID = wafIDNull.String
+		}
+		fallbackBackend := ""
+		if fallbackBackendNull.Valid {
+			fallbackBackend = fallbackBackendNull.String
 		}
 
 		targetURL, err := url.Parse(backend)
@@ -2829,16 +3080,18 @@ func loadProxyInstancesFromDB() error {
 		}
 
 		instance := &ProxyInstance{
-			ID:           id,
-			Name:         name,
-			ListenPort:   listenPort,
-			Backend:      backend,
-			WAFID:        wafID,
-			Proxy:        proxy,
-			TLSEnabled:   tlsEnabled == 1,
-			TLSCertFile:  tlsCertFile,
-			TLSKeyFile:   tlsKeyFile,
-			CreatedAt:    createdAt,
+			ID:              id,
+			Name:            name,
+			ListenPort:      listenPort,
+			Backend:         backend,
+			FallbackBackend: fallbackBackend,
+			WAFID:           wafID,
+			Proxy:           proxy,
+			TLSEnabled:      tlsEnabled == 1,
+			TLSCertFile:     tlsCertFile,
+			TLSKeyFile:      tlsKeyFile,
+			DomainRules:     loadDomainRules(id),
+			CreatedAt:       createdAt,
 		}
 
 		if wafID != "" {
@@ -3149,7 +3402,7 @@ func handleDBUpgrade(w http.ResponseWriter, r *http.Request) {
 
 func getSequentialUpgradeSteps(currentVersion string) []string {
 	var steps []string
-	versions := []string{"1.0", "1.1", "1.2", "1.3"}
+	versions := []string{"1.0", "1.1", "1.2", "1.3", "1.4"}
 	currentIdx := 0
 	
 	for i, v := range versions {
@@ -3169,6 +3422,11 @@ func getSequentialUpgradeSteps(currentVersion string) []string {
 func performSequentialUpgrade(fromVersion string, steps []string) error {
 	initUpgradeProgress()
 
+	_, err := db.Exec("DELETE FROM db_version")
+	if err != nil && !strings.Contains(err.Error(), "no such table") {
+		log.Printf("清理旧版本记录失败: %v", err)
+	}
+
 	currentVersion := fromVersion
 	totalSteps := len(steps)
 
@@ -3184,6 +3442,8 @@ func performSequentialUpgrade(fromVersion string, steps []string) error {
 			err = upgradeTo12()
 		case "1.3":
 			err = upgradeTo13()
+		case "1.4":
+			err = upgradeTo14()
 		default:
 			err = fmt.Errorf("未知的升级目标版本: %s", targetVersion)
 		}
@@ -3199,6 +3459,18 @@ func performSequentialUpgrade(fromVersion string, steps []string) error {
 	updateUpgradeProgress("completed", totalSteps, totalSteps, "所有升级完成")
 	setUpgradeCompleted()
 	log.Printf("数据库升级完成: %s -> %s", fromVersion, currentDBVersion)
+
+	log.Println("合并数据库...")
+	if _, err := db.Exec("VACUUM"); err != nil {
+		log.Printf("合并数据库失败: %v", err)
+	} else {
+		log.Println("数据库合并完成")
+	}
+
+	log.Println("数据库升级完成，3秒后自动重启以应用新数据...")
+	time.Sleep(3 * time.Second)
+	restartProgram()
+	
 	return nil
 }
 
@@ -3683,7 +3955,13 @@ func loadCertificatesFromDB() error {
 			AcmeServerURL:     acmeServerURL,
 			AcmeEmail:         acmeEmail,
 		}
-		cert.Status = getCertificateStatus(expiresAt)
+		if status == "pending" {
+			log.Printf("[证书] 检测到 pending 状态的证书 %s (后端可能已重启)，标记为失败", id)
+			cert.Status = "failed"
+			db.Exec("UPDATE certificates SET status = ? WHERE id = ?", "failed", id)
+		} else {
+			cert.Status = getCertificateStatus(expiresAt)
+		}
 
 		certificateMutex.Lock()
 		certificates[id] = cert
@@ -3730,10 +4008,11 @@ func handleCertificates(w http.ResponseWriter, r *http.Request) {
 
 		id := fmt.Sprintf("cert-%d", time.Now().UnixNano())
 		createdAt := getUTCTimestamp()
+		providerName := convertProviderName(req.Provider)
 
 		_, err := db.Exec(
 			"INSERT INTO certificates (id, name, domains, provider, auto_renew, status, created_at, cloudflare_api_token, cloudflare_email, acme_kid, acme_hmac_key, acme_server_url, acme_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			id, req.Name, req.Domains, req.Provider, boolToInt(req.AutoRenew), "pending", createdAt, req.CloudflareAPIToken, req.CloudflareEmail, req.AcmeKid, req.AcmeHmacKey, req.AcmeServerURL, req.AcmeEmail,
+			id, req.Name, req.Domains, providerName, boolToInt(req.AutoRenew), "pending", createdAt, req.CloudflareAPIToken, req.CloudflareEmail, req.AcmeKid, req.AcmeHmacKey, req.AcmeServerURL, req.AcmeEmail,
 		)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -3770,6 +4049,10 @@ func handleCertificates(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			if err := requestCertificate(cert); err != nil {
 				log.Printf("证书申请失败: %v", err)
+				certificateMutex.Lock()
+				cert.Status = "failed"
+				db.Exec("UPDATE certificates SET status = ? WHERE id = ?", "failed", cert.ID)
+				certificateMutex.Unlock()
 			}
 			certStopChannels.Delete(id)
 		}()
@@ -3895,7 +4178,7 @@ func handleCertificate(w http.ResponseWriter, r *http.Request) {
 
 		cert.Name = req.Name
 		cert.Domains = req.Domains
-		cert.Provider = req.Provider
+		cert.Provider = convertProviderName(req.Provider)
 		cert.AutoRenew = req.AutoRenew
 		cert.CloudflareAPIToken = req.CloudflareAPIToken
 		cert.AcmeEmail = req.AcmeEmail
@@ -3904,8 +4187,9 @@ func handleCertificate(w http.ResponseWriter, r *http.Request) {
 		cert.AcmeServerURL = req.AcmeServerURL
 		certificateMutex.Unlock()
 
+		providerName := convertProviderName(req.Provider)
 		_, err := db.Exec("UPDATE certificates SET name = ?, domains = ?, provider = ?, auto_renew = ?, cloudflare_api_token = ?, acme_email = ?, acme_kid = ?, acme_hmac_key = ?, acme_server_url = ? WHERE id = ?",
-			req.Name, req.Domains, req.Provider, boolToInt(req.AutoRenew), req.CloudflareAPIToken, req.AcmeEmail, req.AcmeKid, req.AcmeHmacKey, req.AcmeServerURL, id)
+			req.Name, req.Domains, providerName, boolToInt(req.AutoRenew), req.CloudflareAPIToken, req.AcmeEmail, req.AcmeKid, req.AcmeHmacKey, req.AcmeServerURL, id)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3992,6 +4276,62 @@ func handleCertificateStop(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func handleCertificateRetry(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	id := strings.TrimPrefix(r.URL.Path, "/api/certificates/")
+	id = strings.TrimSuffix(id, "/retry")
+
+	certificateMutex.Lock()
+	cert, exists := certificates[id]
+	if !exists {
+		certificateMutex.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "证书不存在",
+		})
+		return
+	}
+
+	if cert.Status != "failed" {
+		certificateMutex.Unlock()
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "只有申请失败的证书才能重试",
+		})
+		return
+	}
+
+	cert.Status = "pending"
+	db.Exec("UPDATE certificates SET status = ? WHERE id = ?", "pending", id)
+	certificateMutex.Unlock()
+
+	addCertLog(id, "开始重试证书申请...")
+	go func() {
+		if err := requestCertificate(cert); err != nil {
+			log.Printf("证书申请失败: %v", err)
+			certificateMutex.Lock()
+			cert.Status = "failed"
+			db.Exec("UPDATE certificates SET status = ? WHERE id = ?", "failed", cert.ID)
+			certificateMutex.Unlock()
+		}
+	}()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "证书申请已重新启动",
+	})
+}
+
+func convertProviderName(provider string) string {
+	if provider == "letsencrypt" {
+		return "Let's Encrypt"
+	}
+	return provider
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1
@@ -4041,7 +4381,7 @@ func requestCertificate(cert *Certificate) error {
 	cloudflareProvider, err := cloudflare.NewDNSProviderConfig(&cloudflare.Config{
 		AuthToken:          cloudflarePtr,
 		TTL:                120,
-		PropagationTimeout: 10 * time.Minute,
+		PropagationTimeout: 24 * time.Hour,
 	})
 	if err != nil {
 		addCertLog(cert.ID, fmt.Sprintf("错误: Cloudflare DNS 提供商创建失败 - %v", err))
@@ -4285,13 +4625,14 @@ func handleProxyInstances(w http.ResponseWriter, r *http.Request) {
 	
 	if r.Method == "POST" {
 		var req struct {
-			Name       string `json:"name"`
-			ListenPort int    `json:"listenPort"`
-			Backend    string `json:"backend"`
-			WAFID      string `json:"wafId"`
-			TLSEnabled bool   `json:"tlsEnabled"`
-			TLSCertFile string `json:"tlsCertFile"`
-			TLSKeyFile  string `json:"tlsKeyFile"`
+			Name            string `json:"name"`
+			ListenPort      int    `json:"listenPort"`
+			Backend         string `json:"backend"`
+			FallbackBackend string `json:"fallbackBackend"`
+			WAFID           string `json:"wafId"`
+			TLSEnabled      bool   `json:"tlsEnabled"`
+			TLSCertFile    string `json:"tlsCertFile"`
+			TLSKeyFile     string `json:"tlsKeyFile"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -4302,7 +4643,7 @@ func handleProxyInstances(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		instance, err := createProxyInstance(req.Name, req.ListenPort, req.Backend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile)
+		instance, err := createProxyInstance(req.Name, req.ListenPort, req.Backend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, req.FallbackBackend)
 		if err != nil {
 			log.Printf("创建防护应用失败: %v", err)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -4670,6 +5011,241 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 		proxyMutex.Lock()
 		delete(proxyInstances, id)
 		proxyMutex.Unlock()
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+		})
+		return
+	}
+
+	w.WriteHeader(http.StatusMethodNotAllowed)
+}
+
+func handleDomainRules(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method == "POST" {
+		var req struct {
+			ProxyID     string `json:"proxyId"`
+			Domain      string `json:"domain"`
+			Backend     string `json:"backend"`
+			IsDefault   bool   `json:"isDefault"`
+			RuleType    string `json:"ruleType"`
+			RedirectURL string `json:"redirectUrl"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "无效的请求",
+			})
+			return
+		}
+
+		if req.Domain == "" && !req.IsDefault {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "域名不能为空",
+			})
+			return
+		}
+
+		if req.RuleType == "" {
+			req.RuleType = "proxy"
+		}
+
+		id := fmt.Sprintf("dr-%d", time.Now().UnixNano())
+		createdAt := time.Now().Unix()
+
+		isDefault := 0
+		if req.IsDefault {
+			isDefault = 1
+			db.Exec("UPDATE proxy_domain_rules SET is_default = 0 WHERE proxy_id = ?", req.ProxyID)
+		}
+
+		_, err := db.Exec("INSERT INTO proxy_domain_rules (id, proxy_id, domain, backend, is_default, rule_type, redirect_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			id, req.ProxyID, req.Domain, req.Backend, isDefault, req.RuleType, req.RedirectURL, createdAt)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "创建失败: " + err.Error(),
+			})
+			return
+		}
+
+		proxyMutex.RLock()
+		if inst, ok := proxyInstances[req.ProxyID]; ok {
+			inst.DomainRules = loadDomainRules(req.ProxyID)
+		}
+		proxyMutex.RUnlock()
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"rule": DomainRule{
+				ID:          id,
+				ProxyID:     req.ProxyID,
+				Domain:      req.Domain,
+				Backend:     req.Backend,
+				IsDefault:   req.IsDefault,
+				RuleType:    req.RuleType,
+				RedirectURL: req.RedirectURL,
+				CreatedAt:   fmt.Sprintf("%d", createdAt),
+			},
+		})
+		return
+	}
+
+	if r.Method == "PUT" {
+		var req struct {
+			ID          string `json:"id"`
+			Domain      string `json:"domain"`
+			Backend     string `json:"backend"`
+			IsDefault   bool   `json:"isDefault"`
+			RuleType    string `json:"ruleType"`
+			RedirectURL string `json:"redirectUrl"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "无效的请求",
+			})
+			return
+		}
+
+		var proxyID string
+		err := db.QueryRow("SELECT proxy_id FROM proxy_domain_rules WHERE id = ?", req.ID).Scan(&proxyID)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "规则不存在",
+			})
+			return
+		}
+
+		if req.Domain == "" && !req.IsDefault {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "域名不能为空",
+			})
+			return
+		}
+
+		if req.RuleType == "" {
+			req.RuleType = "proxy"
+		}
+
+		isDefault := 0
+		if req.IsDefault {
+			isDefault = 1
+			db.Exec("UPDATE proxy_domain_rules SET is_default = 0 WHERE proxy_id = ?", proxyID)
+		}
+
+		_, err = db.Exec("UPDATE proxy_domain_rules SET domain = ?, backend = ?, is_default = ?, rule_type = ?, redirect_url = ? WHERE id = ?",
+			req.Domain, req.Backend, isDefault, req.RuleType, req.RedirectURL, req.ID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "更新失败: " + err.Error(),
+			})
+			return
+		}
+
+		proxyMutex.RLock()
+		if inst, ok := proxyInstances[proxyID]; ok {
+			inst.DomainRules = loadDomainRules(proxyID)
+		}
+		proxyMutex.RUnlock()
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+		})
+		return
+	}
+
+	proxyMutex.RLock()
+	var allRules []DomainRule
+	for _, inst := range proxyInstances {
+		for _, rule := range inst.DomainRules {
+			allRules = append(allRules, *rule)
+		}
+	}
+	proxyMutex.RUnlock()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"rules":  allRules,
+	})
+}
+
+func handleDomainRule(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	id := strings.TrimPrefix(r.URL.Path, "/api/domain-rules/")
+
+	if r.Method == "GET" {
+		var rule DomainRule
+		var isDefault int
+		var ruleType, redirectURL sql.NullString
+		err := db.QueryRow("SELECT id, proxy_id, domain, backend, is_default, rule_type, redirect_url, created_at FROM proxy_domain_rules WHERE id = ?", id).Scan(
+			&rule.ID, &rule.ProxyID, &rule.Domain, &rule.Backend, &isDefault, &ruleType, &redirectURL, &rule.CreatedAt)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "规则不存在",
+			})
+			return
+		}
+		rule.IsDefault = isDefault == 1
+		if ruleType.Valid {
+			rule.RuleType = ruleType.String
+		} else {
+			rule.RuleType = "proxy"
+		}
+		if redirectURL.Valid {
+			rule.RedirectURL = redirectURL.String
+		}
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"rule":    rule,
+		})
+		return
+	}
+
+	if r.Method == "DELETE" {
+		var proxyID string
+		err := db.QueryRow("SELECT proxy_id FROM proxy_domain_rules WHERE id = ?", id).Scan(&proxyID)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "规则不存在",
+			})
+			return
+		}
+
+		_, err = db.Exec("DELETE FROM proxy_domain_rules WHERE id = ?", id)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "删除失败: " + err.Error(),
+			})
+			return
+		}
+
+		proxyMutex.RLock()
+		if inst, ok := proxyInstances[proxyID]; ok {
+			inst.DomainRules = loadDomainRules(proxyID)
+		}
+		proxyMutex.RUnlock()
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
@@ -7157,6 +7733,8 @@ func main() {
 			handleProxyInstance(w, r)
 		}
 	})
+	mux.HandleFunc("/api/domain-rules", handleDomainRules)
+	mux.HandleFunc("/api/domain-rules/", handleDomainRule)
 	mux.HandleFunc("/api/certificates", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" {
 			readOnlyMiddleware(handleCertificates)(w, r)
@@ -7177,6 +7755,12 @@ func main() {
 				readOnlyMiddleware(handleCertificateStop)(w, r)
 			} else {
 				handleCertificateStop(w, r)
+			}
+		} else if strings.HasSuffix(path, "/retry") {
+			if r.Method == "POST" {
+				readOnlyMiddleware(handleCertificateRetry)(w, r)
+			} else {
+				handleCertificateRetry(w, r)
 			}
 		} else if strings.HasSuffix(path, "/logs") {
 			handleCertificateLogs(w, r)

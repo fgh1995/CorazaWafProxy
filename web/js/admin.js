@@ -1,6 +1,7 @@
 let availableRules = [];
 let wafInstances = [];
 let proxyInstances = [];
+let domainRules = [];
 let portForwardInstances = [];
 let certificates = [];
 let currentEditWAFId = null;
@@ -412,6 +413,20 @@ function formatUTCTimeToLocal(utcTimeString) {
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
+function formatTime(timestamp) {
+    if (!timestamp) return '未知';
+    const num = typeof timestamp === 'string' ? parseInt(timestamp) : timestamp;
+    if (isNaN(num)) return '未知';
+    const date = new Date(num >= 1e12 ? num : num * 1000);
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    const h = String(date.getHours()).padStart(2, '0');
+    const min = String(date.getMinutes()).padStart(2, '0');
+    const s = String(date.getSeconds()).padStart(2, '0');
+    return `${y}-${m}-${d} ${h}:${min}:${s}`;
+}
+
 function showAlert(title, message) {
     document.getElementById('alertTitle').textContent = title;
     document.getElementById('alertMessage').textContent = message;
@@ -547,26 +562,32 @@ async function performDatabaseUpgrade() {
         
         try {
             const completedResult = await pollUpgradeProgress();
-            
+
             if (completedResult.message && completedResult.message.includes('完成')) {
-                setUpgradeProgress(100, '数据库升级成功');
+                setUpgradeProgress(100, '升级成功，页面将在6秒后刷新...');
                 setUpgradeStep('stepUpgrade', 'done');
                 setUpgradeStep('stepComplete', 'done');
                 document.getElementById('upgradeIcon').textContent = '✅';
+                document.getElementById('upgradeMessage').style.color = 'var(--danger-red)';
+                setTimeout(() => location.reload(), 6000);
             } else {
-                setUpgradeProgress(100, completedResult.step || '升级完成');
+                setUpgradeProgress(100, '升级成功，页面将在6秒后刷新...');
                 setUpgradeStep('stepUpgrade', 'done');
                 setUpgradeStep('stepComplete', 'done');
                 document.getElementById('upgradeIcon').textContent = '✅';
+                document.getElementById('upgradeMessage').style.color = 'var(--danger-red)';
+                setTimeout(() => location.reload(), 6000);
             }
         } catch (pollError) {
-            setUpgradeProgress(100, '升级完成');
+            setUpgradeProgress(100, '升级成功，页面将在6秒后刷新...');
             setUpgradeStep('stepUpgrade', 'done');
             setUpgradeStep('stepComplete', 'done');
             document.getElementById('upgradeIcon').textContent = '✅';
+            document.getElementById('upgradeMessage').style.color = 'var(--danger-red)';
+            setTimeout(() => location.reload(), 6000);
             console.error('轮询进度失败:', pollError);
         }
-        
+
         enableUpgradeCloseBtn();
         
     } catch (error) {
@@ -673,10 +694,24 @@ async function loadProxyInstances() {
         
         if (data.success) {
             proxyInstances = data.instances || [];
+            await loadDomainRules();
             renderProxyInstances();
         }
     } catch (error) {
         console.error('加载防护应用失败:', error);
+    }
+}
+
+async function loadDomainRules() {
+    try {
+        const response = await fetch('/api/domain-rules');
+        const data = await response.json();
+        
+        if (data.success) {
+            domainRules = data.rules || [];
+        }
+    } catch (error) {
+        console.error('加载域名规则失败:', error);
     }
 }
 
@@ -717,7 +752,7 @@ function renderWAFInstances() {
                 </div>
                 <div class="instance-grid-item">
                     <div class="instance-grid-label">创建时间</div>
-                    <div class="instance-grid-value">${instance.createdAt}</div>
+                    <div class="instance-grid-value">${formatTime(instance.createdAt)}</div>
                 </div>
                 <div class="instance-grid-item">
                     <div class="instance-grid-label">绑定应用</div>
@@ -746,41 +781,66 @@ function renderProxyInstances() {
     
     proxyInstances.forEach(instance => {
         const wafDisplay = instance.wafName || (instance.wafId ? '未绑定' : '未绑定');
-        const tlsBadge = instance.tlsEnabled ? '<span class="instance-badge" style="background: #34a853;">HTTPS</span>' : '';
+        const tlsBadge = instance.tlsEnabled ? '<span class="instance-badge" style="background: rgba(52, 168, 83, 0.1); color: #34a853;">HTTPS</span>' : '';
+        
+        const instanceRules = domainRules.filter(r => r.proxyId === instance.id);
+        
+        let getRuleTypeDisplay = (rule) => {
+            if (rule.ruleType === 'redirect') return '重定向';
+            if (rule.ruleType === 'close') return '关闭连接';
+            return '反向代理';
+        };
+        
+        let rulesHtml = '';
+        if (instanceRules.length > 0) {
+            rulesHtml = instanceRules.map(rule => {
+                let actionDisplay = rule.domain === '' || rule.isDefault ? '默认规则' : rule.domain.split('\n').join(', ');
+                let targetDisplay = rule.ruleType === 'redirect' ? rule.redirectUrl : (rule.ruleType === 'close' ? '-' : (rule.backend || '-'));
+                return `
+                <tr style="transition: background 0.2s;">
+                    <td style="padding: 8px 12px; border-bottom: 1px solid #e0e0e0; font-size: 13px;">${actionDisplay}</td>
+                    <td style="padding: 8px 12px; border-bottom: 1px solid #e0e0e0; font-size: 13px;">${getRuleTypeDisplay(rule)}</td>
+                    <td style="padding: 8px 12px; border-bottom: 1px solid #e0e0e0; font-size: 13px;">${targetDisplay}</td>
+                    <td style="padding: 8px 12px; border-bottom: 1px solid #e0e0e0; text-align: right; white-space: nowrap;">
+                        <button class="btn-icon" style="font-size: 12px;" onclick="editDomainRule('${rule.id}')" title="编辑">✏️</button>
+                        <button class="btn-icon" style="font-size: 12px;" onclick="deleteDomainRule('${rule.id}')" title="删除">🗑️</button>
+                    </td>
+                </tr>`;
+            }).join('');
+        } else {
+            rulesHtml = '<tr><td colspan="4" style="padding: 12px; color: #999; text-align: center; font-size: 13px;">暂无域名规则</td></tr>';
+        }
+        
         const div = document.createElement('div');
-        div.className = 'instance-item';
+        div.className = 'proxy-instance-card';
 
         div.innerHTML = `
-            <div class="instance-header">
-                <div class="instance-name">
-                    <span>🌐</span>
-                    <span>${instance.name}</span>
+            <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: #f5f7fa; border-bottom: 1px solid #e0e0e0;">
+                <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                    <span style="font-weight: 600; font-size: 14px;">🌐 ${instance.name}</span>
+                    <span class="instance-badge">端口: ${instance.listenPort}</span>
+                    ${tlsBadge}
+                    <span style="font-size: 13px; color: #666;">WAF: ${wafDisplay}</span>
                 </div>
-                <span class="instance-badge">端口: ${instance.listenPort}</span>
-                ${tlsBadge}
-            </div>
-            <div class="instance-grid">
-                <div class="instance-grid-item">
-                    <div class="instance-grid-label">实例 ID</div>
-                    <div class="instance-grid-value">${instance.id}</div>
-                </div>
-                <div class="instance-grid-item">
-                    <div class="instance-grid-label">后端地址</div>
-                    <div class="instance-grid-value">${instance.backend}</div>
-                </div>
-                <div class="instance-grid-item">
-                    <div class="instance-grid-label">绑定 WAF</div>
-                    <div class="instance-grid-value">${wafDisplay}</div>
-                </div>
-                <div class="instance-grid-item">
-                    <div class="instance-grid-label">创建时间</div>
-                    <div class="instance-grid-value">${instance.createdAt}</div>
+                <div style="display: flex; gap: 8px;">
+                    <button class="btn btn-primary" style="padding: 5px 12px; font-size: 12px;" onclick="openAddDomainRuleModal('${instance.id}')">+ 添加规则</button>
+                    <button class="btn-icon" onclick="editProxyInstance('${instance.id}')" title="编辑">✏️</button>
+                    <button class="btn-icon delete" onclick="deleteProxyInstance('${instance.id}')" title="删除">🗑️</button>
                 </div>
             </div>
-            <div class="instance-actions">
-                <button class="btn-icon" onclick="editProxyInstance('${instance.id}')" title="编辑">✏️</button>
-                <button class="btn-icon delete" onclick="deleteProxyInstance('${instance.id}')" title="删除">🗑️</button>
-            </div>
+            <table style="width: 100%; border-collapse: collapse;">
+                <thead>
+                    <tr style="background: #fafafa;">
+                        <th style="padding: 10px 14px; text-align: left; font-size: 12px; font-weight: 600; color: #666; border-bottom: 1px solid #e0e0e0;">规则名称</th>
+                        <th style="padding: 10px 14px; text-align: left; font-size: 12px; font-weight: 600; color: #666; border-bottom: 1px solid #e0e0e0; width: 100px;">类型</th>
+                        <th style="padding: 10px 14px; text-align: left; font-size: 12px; font-weight: 600; color: #666; border-bottom: 1px solid #e0e0e0;">目标</th>
+                        <th style="padding: 10px 14px; text-align: right; font-size: 12px; font-weight: 600; color: #666; border-bottom: 1px solid #e0e0e0; width: 90px;">操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${rulesHtml}
+                </tbody>
+            </table>
         `;
         container.appendChild(div);
     });
@@ -922,11 +982,15 @@ async function openCreateProxyModal() {
     document.getElementById('proxyEditName').value = '';
     document.getElementById('proxyEditPort').value = '';
     document.getElementById('proxyEditBackend').value = '';
+    document.getElementById('proxyEditFallbackBackend').value = '';
     document.getElementById('proxyEditTLSEnabled').checked = false;
     document.getElementById('proxyEditTLSCertFile').value = '';
     document.getElementById('proxyEditTLSKeyFile').value = '';
     document.getElementById('proxyEditCertId').value = '';
     toggleProxyTLSFields();
+
+    document.getElementById('proxyBackendGroup').style.display = 'none';
+    document.getElementById('proxyFallbackBackendGroup').style.display = 'none';
 
     const select = document.getElementById('proxyEditWAFId');
     select.innerHTML = '<option value="">不绑定 WAF</option>';
@@ -954,10 +1018,14 @@ async function editProxyInstance(id) {
     document.getElementById('proxyEditName').value = instance.name;
     document.getElementById('proxyEditPort').value = instance.listenPort;
     document.getElementById('proxyEditBackend').value = instance.backend;
+    document.getElementById('proxyEditFallbackBackend').value = instance.fallbackBackend || '';
     document.getElementById('proxyEditTLSEnabled').checked = instance.tlsEnabled || false;
     document.getElementById('proxyEditTLSCertFile').value = instance.tlsCertFile || '';
     document.getElementById('proxyEditTLSKeyFile').value = instance.tlsKeyFile || '';
     toggleProxyTLSFields();
+
+    document.getElementById('proxyBackendGroup').style.display = 'none';
+    document.getElementById('proxyFallbackBackendGroup').style.display = 'none';
 
     const select = document.getElementById('proxyEditWAFId');
     select.innerHTML = '<option value="">不绑定 WAF</option>';
@@ -1006,17 +1074,178 @@ function closeProxyModal() {
     currentEditProxyId = null;
 }
 
+let currentDomainRuleProxyId = null;
+let currentEditDomainRuleId = null;
+
+function openAddDomainRuleModal(proxyId) {
+    currentDomainRuleProxyId = proxyId;
+    currentEditDomainRuleId = null;
+    const proxy = proxyInstances.find(p => p.id === proxyId);
+    if (!proxy) return;
+    
+    document.getElementById('domainRuleProxyId').value = proxyId;
+    document.getElementById('domainRuleProxyName').textContent = proxy.name;
+    document.getElementById('domainRuleModalTitle').textContent = '添加域名规则';
+    document.getElementById('domainRuleSubmitBtn').textContent = '添加';
+    document.getElementById('domainRuleDomain').value = '';
+    document.getElementById('domainRuleBackend').value = '';
+    document.getElementById('domainRuleType').value = 'proxy';
+    document.getElementById('domainRuleRedirectUrl').value = '';
+    document.getElementById('domainRuleEditId').value = '';
+    
+    document.getElementById('domainRuleDomainGroup').style.display = 'block';
+    
+    toggleDomainRuleFields();
+    document.getElementById('domainRuleModal').classList.remove('modal-hidden');
+}
+
+function closeDomainRuleModal() {
+    document.getElementById('domainRuleModal').classList.add('modal-hidden');
+    currentDomainRuleProxyId = null;
+    currentEditDomainRuleId = null;
+}
+
+async function addDomainRule() {
+    if (!currentDomainRuleProxyId) return;
+    
+    const editId = document.getElementById('domainRuleEditId').value;
+    const isEditing = editId !== '';
+    const domain = document.getElementById('domainRuleDomain').value.trim();
+    const backend = document.getElementById('domainRuleBackend').value.trim();
+    const ruleType = document.getElementById('domainRuleType').value;
+    const redirectUrl = document.getElementById('domainRuleRedirectUrl').value.trim();
+    
+    const rule = isEditing ? domainRules.find(r => r.id === editId) : null;
+    const isDefaultRule = rule ? rule.isDefault : false;
+    
+    if (!isDefaultRule && !domain) {
+        showAlert('提示', '请填写域名');
+        return;
+    }
+    
+    if (ruleType === 'proxy' && !backend) {
+        showAlert('提示', '请填写后端地址');
+        return;
+    }
+    
+    if (ruleType === 'redirect' && !redirectUrl) {
+        showAlert('提示', '请填写重定向URL');
+        return;
+    }
+    
+    try {
+        const url = isEditing ? `/api/domain-rules` : '/api/domain-rules';
+        const method = isEditing ? 'PUT' : 'POST';
+        
+        const requestBody = {
+            proxyId: currentDomainRuleProxyId,
+            domain: domain,
+            backend: backend,
+            isDefault: isDefaultRule,
+            ruleType: ruleType,
+            redirectUrl: redirectUrl
+        };
+        
+        if (isEditing) {
+            requestBody.id = editId;
+        }
+        
+        const response = await fetch(url, {
+            method: method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestBody)
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            closeDomainRuleModal();
+            loadProxyInstances();
+            showAlert('成功', isEditing ? '域名规则已更新' : '域名规则已添加');
+        } else {
+            showAlert('错误', data.error || '操作失败');
+        }
+    } catch (error) {
+        console.error('操作域名规则失败:', error);
+        showAlert('错误', error.message);
+    }
+}
+
+async function editDomainRule(id) {
+    currentEditDomainRuleId = id;
+    const rule = domainRules.find(r => r.id === id);
+    if (!rule) {
+        showAlert('错误', '规则不存在');
+        return;
+    }
+    
+    currentDomainRuleProxyId = rule.proxyId;
+    const proxy = proxyInstances.find(p => p.id === rule.proxyId);
+    
+    document.getElementById('domainRuleEditId').value = id;
+    document.getElementById('domainRuleProxyId').value = rule.proxyId;
+    document.getElementById('domainRuleProxyName').textContent = proxy ? proxy.name : '';
+    document.getElementById('domainRuleModalTitle').textContent = '编辑域名规则';
+    document.getElementById('domainRuleSubmitBtn').textContent = '保存';
+    
+    if (rule.isDefault) {
+        document.getElementById('domainRuleDomainGroup').style.display = 'none';
+        document.getElementById('domainRuleDomain').value = '';
+    } else {
+        document.getElementById('domainRuleDomainGroup').style.display = 'block';
+        document.getElementById('domainRuleDomain').value = rule.domain || '';
+    }
+    
+    document.getElementById('domainRuleBackend').value = rule.backend || '';
+    document.getElementById('domainRuleType').value = rule.ruleType || 'proxy';
+    document.getElementById('domainRuleRedirectUrl').value = rule.redirectUrl || '';
+    
+    toggleDomainRuleFields();
+    document.getElementById('domainRuleModal').classList.remove('modal-hidden');
+}
+
+function toggleDomainRuleFields() {
+    const ruleType = document.getElementById('domainRuleType').value;
+    document.getElementById('domainRuleBackendGroup').style.display = ruleType === 'proxy' ? 'block' : 'none';
+    document.getElementById('domainRuleRedirectUrlGroup').style.display = ruleType === 'redirect' ? 'block' : 'none';
+}
+
+async function deleteDomainRule(id) {
+    showConfirm('确定要删除此域名规则吗？', async (confirmed) => {
+        if (!confirmed) return;
+        
+        try {
+            const response = await fetch(`/api/domain-rules/${id}`, {
+                method: 'DELETE'
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                loadProxyInstances();
+                showAlert('成功', '域名规则已删除');
+            } else {
+                showAlert('错误', data.error || '删除失败');
+            }
+        } catch (error) {
+            console.error('删除域名规则失败:', error);
+            showAlert('错误', error.message);
+        }
+    });
+}
+
 async function saveProxyEdit() {
     const name = document.getElementById('proxyEditName').value;
     const listenPort = parseInt(document.getElementById('proxyEditPort').value);
     const backend = document.getElementById('proxyEditBackend').value;
+    const fallbackBackend = document.getElementById('proxyEditFallbackBackend').value;
     const wafId = document.getElementById('proxyEditWAFId').value;
     const tlsEnabled = document.getElementById('proxyEditTLSEnabled').checked;
     const tlsCertFile = document.getElementById('proxyEditTLSCertFile').value;
     const tlsKeyFile = document.getElementById('proxyEditTLSKeyFile').value;
 
-    if (!name || !listenPort || !backend) {
-        showAlert('提示', '请填写完整信息');
+    if (!name || !listenPort) {
+        showAlert('提示', '请填写名称和端口');
         return;
     }
 
@@ -1037,6 +1266,7 @@ async function saveProxyEdit() {
                     name: name,
                     listenPort: listenPort,
                     backend: backend,
+                    fallbackBackend: fallbackBackend,
                     wafId: wafId,
                     tlsEnabled: tlsEnabled,
                     tlsCertFile: tlsCertFile,
@@ -1053,6 +1283,7 @@ async function saveProxyEdit() {
                     name: name,
                     listenPort: listenPort,
                     backend: backend,
+                    fallbackBackend: fallbackBackend,
                     wafId: wafId,
                     tlsEnabled: tlsEnabled,
                     tlsCertFile: tlsCertFile,
@@ -1129,20 +1360,25 @@ function renderCertificates() {
         const div = document.createElement('div');
         div.className = 'instance-item';
 
-        const statusClass = {
-            'pending': 'detection',
-            'valid': 'blocking',
-            'expired': 'off'
-        }[cert.status] || 'off';
+        let statusClass = 'off';
+        let statusText = '未知';
 
-        const statusText = {
-            'pending': '待验证',
-            'valid': '有效',
-            'expired': '已过期'
-        }[cert.status] || cert.status;
+        if (cert.status === 'pending') {
+            statusClass = 'breathing';
+            statusText = '正在申请';
+        } else if (cert.status === 'valid') {
+            statusClass = 'running';
+            statusText = '有效';
+        } else if (cert.status === 'expired') {
+            statusClass = 'off';
+            statusText = '已过期';
+        } else if (cert.status === 'failed') {
+            statusClass = 'blocking';
+            statusText = '失败';
+        }
 
-        const expiresAt = cert.expiresAt ? new Date(cert.expiresAt * 1000).toLocaleString('zh-CN') : '未知';
-        const autoRenewBadge = cert.autoRenew ? '<span class="instance-badge" style="background: #34a853;">自动续期</span>' : '';
+        const expiresAt = formatTime(cert.expiresAt);
+        const autoRenewBadge = cert.autoRenew ? '<span class="instance-badge" style="background: rgba(52, 168, 83, 0.1); color: #34a853;">自动续期</span>' : '';
 
         div.innerHTML = `
             <div class="instance-header">
@@ -1156,7 +1392,10 @@ function renderCertificates() {
             <div class="instance-grid">
                 <div class="instance-grid-item">
                     <div class="instance-grid-label">域名</div>
-                    <div class="instance-grid-value" style="white-space: pre-line;">${cert.domains}</div>
+                    <div class="instance-grid-value" style="position: relative; cursor: pointer;" onmouseover="this.querySelector('.domain-tooltip').style.display='block'" onmouseout="this.querySelector('.domain-tooltip').style.display='none'">
+                        <span style="display: inline-block; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;">${cert.domains.split(',')[0]}</span>${cert.domains.includes(',') ? '<span style="color: var(--primary-blue);"> (+' + (cert.domains.split(',').length - 1) + ')</span>' : ''}
+                        <div class="domain-tooltip" style="display: none; position: absolute; top: 100%; left: 0; background: #fff; border: 1px solid var(--border-light); border-radius: 6px; padding: 8px 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 100; white-space: pre-line; font-size: 13px; min-width: 150px;">${cert.domains.replace(/,/g, '\n')}</div>
+                    </div>
                 </div>
                 <div class="instance-grid-item">
                     <div class="instance-grid-label">颁发机构</div>
@@ -1175,6 +1414,7 @@ function renderCertificates() {
                 <button class="btn-icon" onclick="viewCertLogs('${cert.id}')" title="查看日志">📜</button>
                 <button class="btn-icon" onclick="editCertificate('${cert.id}')" title="编辑">✏️</button>
                 ${cert.status === 'pending' ? `<button class="btn-icon" onclick="stopCertificate('${cert.id}')" title="停止">⏹️</button>` : ''}
+                ${cert.status === 'failed' ? `<button class="btn-icon" onclick="retryCertificate('${cert.id}')" title="重试">🔄</button>` : ''}
                 ${cert.status === 'valid' ? `<button class="btn-icon" onclick="renewCertificate('${cert.id}')" title="续期">🔄</button>` : ''}
                 <button class="btn-icon delete" onclick="deleteCertificate('${cert.id}')" title="删除">🗑️</button>
             </div>
@@ -1341,7 +1581,6 @@ async function applyCertificate() {
             } else {
                 closeCertModal();
                 loadCertificates();
-                showAlert('提示', '证书申请已开始，请在证书卡片中查看进度');
             }
         } else {
             closeCertModal();
@@ -1361,8 +1600,8 @@ function viewCertDetail(id) {
         return;
     }
 
-    const expiresAt = cert.expiresAt ? new Date(cert.expiresAt * 1000).toLocaleString('zh-CN') : '未知';
-    const createdAt = cert.createdAt ? new Date(parseInt(cert.createdAt) * 1000).toLocaleString('zh-CN') : '未知';
+    const expiresAt = formatTime(cert.expiresAt);
+    const createdAt = formatTime(cert.createdAt);
 
     const content = `
         <div style="display: grid; gap: 16px;">
@@ -1455,7 +1694,7 @@ function editCertificate(id) {
     document.getElementById('certEditName').value = cert.name;
     document.getElementById('certEditProvider').value = cert.provider || 'letsencrypt';
     document.getElementById('certEditCloudflareToken').value = cert.cloudflareApiToken || '';
-    document.getElementById('certEditDomains').value = cert.domains || '';
+    document.getElementById('certEditDomains').value = (cert.domains || '').replace(/,/g, '\n');
     document.getElementById('certEditAutoRenew').checked = cert.autoRenew === true || cert.autoRenew === 1;
     document.getElementById('certApplyForm').style.display = 'block';
     document.getElementById('certLogContainer').style.display = 'none';
@@ -1494,6 +1733,29 @@ async function stopCertificate(id) {
             }
         } catch (error) {
             console.error('停止证书失败:', error);
+            showAlert('错误', error.message);
+        }
+    });
+}
+
+async function retryCertificate(id) {
+    showConfirm('确定要重试此证书的申请吗？', async (confirmed) => {
+        if (!confirmed) return;
+
+        try {
+            const response = await fetch(`/api/certificates/${id}/retry`, {
+                method: 'POST'
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                loadCertificates();
+            } else {
+                showAlert('错误', data.error || '重试失败');
+            }
+        } catch (error) {
+            console.error('重试证书失败:', error);
             showAlert('错误', error.message);
         }
     });
@@ -1614,7 +1876,7 @@ function renderPortForwardInstances() {
                 </div>
                 <div class="instance-grid-item">
                     <div class="instance-grid-label">创建时间</div>
-                    <div class="instance-grid-value">${instance.createdAt}</div>
+                    <div class="instance-grid-value">${formatTime(instance.createdAt)}</div>
                 </div>
             </div>
             <div class="instance-actions">
@@ -6341,6 +6603,9 @@ function formatNumber(num) {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+    const prevDayRadio = document.querySelector('input[name="compare"][value="prev-day"]');
+    if (prevDayRadio) prevDayRadio.checked = true;
+    
     loadCurrentUser();
     loadSystemSettings();
     loadAvailableRules();

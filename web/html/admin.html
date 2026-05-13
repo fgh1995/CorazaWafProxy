@@ -946,7 +946,8 @@
         }
 
         .form-group input,
-        .form-group select {
+        .form-group select,
+        .form-group textarea {
             width: 100%;
             padding: 12px 16px;
             background: white;
@@ -957,8 +958,15 @@
             transition: all 0.2s ease;
         }
 
+        .form-group textarea {
+            resize: vertical;
+            font-family: inherit;
+            line-height: 1.5;
+        }
+
         .form-group input:focus,
-        .form-group select:focus {
+        .form-group select:focus,
+        .form-group textarea:focus {
             outline: none;
             border-color: var(--primary-blue);
             box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.1);
@@ -1148,58 +1156,63 @@
         .instance-list {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-            gap: 20px;
+            gap: 16px;
+        }
+
+        .proxy-instance-list {
+            display: block;
         }
 
         .instance-item {
-            background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
+            background: #fff;
             border: 1px solid var(--border-light);
-            border-radius: 12px;
-            padding: 20px;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            position: relative;
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 16px;
+            transition: all 0.2s ease;
             overflow: hidden;
-            box-shadow: 0 1px 3px rgba(60, 64, 67, 0.1);
+        }
+
+        .instance-item:hover {
+            border-color: var(--primary-blue);
         }
 
         .instance-item::before {
             content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 3px;
-            background: linear-gradient(90deg, var(--primary-blue), var(--secondary-blue));
-            opacity: 0;
-            transition: opacity 0.3s ease;
-        }
-
-        .instance-item:hover {
-            box-shadow: 0 8px 24px rgba(60, 64, 67, 0.15);
-            transform: translateY(-4px);
-            border-color: var(--primary-blue);
+            display: none;
         }
 
         .instance-item:hover::before {
-            opacity: 1;
+            display: none;
+        }
+
+        .proxy-instance-card {
+            background: #fff;
+            border: 1px solid var(--border-light);
+            border-radius: 8px;
+            margin-bottom: 16px;
+            transition: all 0.2s ease;
+            overflow: hidden;
+        }
+
+        .proxy-instance-card:hover {
+            border-color: var(--primary-blue);
         }
 
         .instance-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 16px;
-            padding-bottom: 12px;
-            border-bottom: 1px solid var(--border-light);
+            margin-bottom: 8px;
         }
 
         .instance-name {
-            font-size: 16px;
+            font-size: 14px;
             font-weight: 600;
             color: var(--text-primary);
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 6px;
         }
 
         .instance-status {
@@ -1239,6 +1252,17 @@
             color: var(--text-muted);
         }
 
+        .instance-status.breathing {
+            animation: breathing 1.5s ease-in-out infinite;
+            background: rgba(26, 115, 232, 0.15);
+            color: var(--primary-blue);
+        }
+
+        @keyframes breathing {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.6; transform: scale(0.98); }
+        }
+
         .instance-badge {
             display: inline-flex;
             align-items: center;
@@ -1249,6 +1273,11 @@
             font-weight: 500;
             background: var(--light-blue);
             color: var(--primary-blue);
+        }
+
+        .instance-badge[style*="background: #34a853"],
+        .instance-badge[style*="background:rgba(52, 168, 83"] {
+            color: #2d8a46 !important;
         }
 
         .instance-details {
@@ -1297,18 +1326,19 @@
         }
 
         .btn-icon {
-            width: 36px;
-            height: 36px;
+            width: 32px;
+            height: 32px;
             border: none;
-            border-radius: 8px;
+            border-radius: 6px;
             background: var(--bg-light);
             color: var(--text-secondary);
             cursor: pointer;
-            display: flex;
+            display: inline-flex;
             align-items: center;
             justify-content: center;
             font-size: 14px;
             transition: all 0.2s ease;
+            vertical-align: middle;
         }
 
         .btn-icon:hover {
@@ -2686,7 +2716,7 @@
                         <h2>防护应用</h2>
                         <button class="btn btn-primary" onclick="openCreateProxyModal()">➕ 创建防护应用</button>
                     </div>
-                    <div class="instance-list" id="proxyInstancesList"></div>
+                    <div class="proxy-instance-list" id="proxyInstancesList"></div>
                 </div>
                 <div class="card">
                     <div class="card-title-inline">
@@ -3081,9 +3111,16 @@
                     <label>监听端口</label>
                     <input type="number" id="proxyEditPort" placeholder="例如: 9000">
                 </div>
-                <div class="form-group">
+                <div id="proxyBackendGroup" class="form-group" style="display: none;">
                     <label>后端地址</label>
                     <input type="text" id="proxyEditBackend" placeholder="例如: http://192.168.1.100:8080">
+                </div>
+                <div id="proxyFallbackBackendGroup" class="form-group" style="display: none;">
+                    <label>默认后端 <small style="color: var(--text-muted);">(域名无匹配时使用)</small></label>
+                    <input type="text" id="proxyEditFallbackBackend" placeholder="例如: http://192.168.1.100:8080">
+                </div>
+                <div id="proxyDomainRulesGroup" class="form-group" style="display: none;">
+                    <label>域名规则 <small style="color: var(--text-muted);">(在下方规则列表中管理)</small></label>
                 </div>
                 <div class="form-group">
                     <label>绑定 CorazaWAF</label>
@@ -3152,7 +3189,7 @@
                     </div>
                     <div id="letsencryptFields">
                         <div class="form-group">
-                            <label>邮箱 <small style="color: var(--text-muted);">(可选，用于证书到期提醒)</small></label>
+                            <label>邮箱 <small style="color: var(--text-muted);"></small></label>
                             <input type="email" id="certEditAcmeEmail" placeholder="your@email.com">
                         </div>
                     </div>
@@ -3180,6 +3217,46 @@
             <div class="modal-footer">
                 <button class="btn" id="certModalCancelBtn" onclick="closeCertModal()">取消</button>
                 <button class="btn btn-primary" id="certModalApplyBtn" onclick="applyCertificate()">申请证书</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="domainRuleModal" class="modal modal-hidden">
+        <div class="modal-content" style="max-width: 500px;">
+            <div class="modal-header">
+                <h3 id="domainRuleModalTitle">添加域名规则</h3>
+                <button class="modal-close" onclick="closeDomainRuleModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div style="margin-bottom: 15px; padding: 10px; background: #e3f2fd; border-radius: 6px;">
+                    <small style="color: #1565c0;">所属防护应用: <strong id="domainRuleProxyName"></strong></small>
+                    <input type="hidden" id="domainRuleProxyId">
+                    <input type="hidden" id="domainRuleEditId">
+                </div>
+                <div class="form-group">
+                    <label>规则类型</label>
+                    <select id="domainRuleType" onchange="toggleDomainRuleFields()">
+                        <option value="proxy">反向代理</option>
+                        <option value="redirect">重定向 (307)</option>
+                        <option value="close">关闭连接</option>
+                    </select>
+                </div>
+                <div class="form-group" id="domainRuleDomainGroup">
+                    <label>域名 <small style="color: var(--text-muted);">(支持多行，每行一个域名)</small></label>
+                    <textarea id="domainRuleDomain" rows="3" placeholder="a.example.com&#10;b.example.com"></textarea>
+                </div>
+                <div class="form-group" id="domainRuleBackendGroup">
+                    <label>后端地址</label>
+                    <input type="text" id="domainRuleBackend" placeholder="例如: http://192.168.2.102:5777">
+                </div>
+                <div class="form-group" id="domainRuleRedirectUrlGroup" style="display: none;">
+                    <label>重定向URL</label>
+                    <input type="text" id="domainRuleRedirectUrl" placeholder="例如: https://example.com">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="closeDomainRuleModal()">取消</button>
+                <button class="btn btn-primary" id="domainRuleSubmitBtn" onclick="addDomainRule()">添加</button>
             </div>
         </div>
     </div>
@@ -3323,7 +3400,7 @@
             <div class="modal-body">
                 <div style="margin-bottom: 16px;">
                     <label style="display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-primary);">IP地址列表（一行一个）</label>
-                    <textarea id="whitelistIPs" rows="10" placeholder="例如:&#10;192.168.1.1&#10;192.168.1.0/24&#10;10.0.0.1" style="width: 100%; padding: 10px; border: 1px solid var(--border-light); border-radius: 6px; font-size: 14px; font-family: monospace; resize: vertical;"></textarea>
+                    <textarea id="whitelistIPs" rows="10" placeholder="例如:&#10;192.168.1.1&#10;192.168.1.0/24&#10;10.0.0.1"></textarea>
                     <div style="margin-top: 8px; font-size: 12px; color: var(--text-muted);">
                         支持单个IP（如 192.168.1.1）和CIDR网段（如 192.168.1.0/24）
                     </div>
@@ -3345,7 +3422,7 @@
             <div class="modal-body">
                 <div style="margin-bottom: 16px;">
                     <label style="display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-primary);">IP地址列表（一行一个）</label>
-                    <textarea id="blacklistIPs" rows="10" placeholder="例如:&#10;192.168.1.100&#10;192.168.1.0/24&#10;10.0.0.1" style="width: 100%; padding: 10px; border: 1px solid var(--border-light); border-radius: 6px; font-size: 14px; font-family: monospace; resize: vertical;"></textarea>
+                    <textarea id="blacklistIPs" rows="10" placeholder="例如:&#10;192.168.1.100&#10;192.168.1.0/24&#10;10.0.0.1"></textarea>
                     <div style="margin-top: 8px; font-size: 12px; color: var(--text-muted);">
                         支持单个IP（如 192.168.1.1）和CIDR网段（如 192.168.1.0/24）
                     </div>
@@ -3413,7 +3490,7 @@
                 </div>
                 <div style="margin-bottom: 16px;">
                     <label style="display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-primary);">IP过滤规则（一行一个）</label>
-                    <textarea id="rirImportRules" rows="3" placeholder="CN|ipv4&#10;CN|ipv6" style="width: 100%; padding: 8px; border: 1px solid var(--border-light); border-radius: 6px; font-size: 13px; font-family: monospace; resize: vertical;"></textarea>
+                    <textarea id="rirImportRules" rows="3" placeholder="CN|ipv4&#10;CN|ipv6"></textarea>
                 </div>
                 <div style="margin-bottom: 16px;">
                     <label style="display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-primary);">导入日志</label>
