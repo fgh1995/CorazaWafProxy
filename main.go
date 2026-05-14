@@ -47,8 +47,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.4"
-const localVersionInt = 4040// 版本整数值，用于对比
+const frontendVersion = "v0.4.5"
+const localVersionInt = 4050 // 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
@@ -192,11 +192,7 @@ func getCurrentDBVersion() string {
 }
 
 func setDBVersion(version string) error {
-	_, err := db.Exec("DELETE FROM db_version")
-	if err != nil && !strings.Contains(err.Error(), "no such table") {
-		return err
-	}
-	_, err = db.Exec("INSERT INTO db_version (version, updated_at) VALUES (?, ?)", version, getUTCTimestamp())
+	_, err := db.Exec("INSERT INTO db_version (version, updated_at) VALUES (?, ?)", version, getUTCTimestamp())
 	return err
 }
 
@@ -510,7 +506,7 @@ func upgradeTo13() error {
 
 func upgradeTo14() error {
 	log.Println("升级到版本 1.4...")
-	updateUpgradeProgress("upgrading", 0, 5, "创建域名规则表 proxy_domain_rules...")
+	updateUpgradeProgress("upgrading", 0, 8, "创建域名规则表 proxy_domain_rules...")
 
 	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS proxy_domain_rules (
 		id TEXT PRIMARY KEY,
@@ -529,7 +525,7 @@ func upgradeTo14() error {
 	}
 	log.Println("proxy_domain_rules 表已创建")
 
-	updateUpgradeProgress("upgrading", 1, 5, "添加 fallback_backend 字段到 proxy_instances...")
+	updateUpgradeProgress("upgrading", 1, 8, "添加 fallback_backend 字段到 proxy_instances...")
 	_, err = db.Exec("ALTER TABLE proxy_instances ADD COLUMN fallback_backend TEXT")
 	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
 		log.Printf("添加 fallback_backend 字段失败: %v", err)
@@ -537,7 +533,75 @@ func upgradeTo14() error {
 	}
 	log.Println("fallback_backend 字段已添加/已存在")
 
-	updateUpgradeProgress("upgrading", 2, 5, "添加 rule_type 字段到域名规则...")
+	updateUpgradeProgress("upgrading", 2, 8, "检查是否需要迁移代理实例...")
+	rows, err := db.Query("SELECT name, listen_port, backend, waf_id, created_at, tls_enabled, tls_cert_file, tls_key_file FROM proxy_instances")
+	if err != nil {
+		log.Printf("查询代理实例失败: %v", err)
+		return err
+	}
+	defer rows.Close()
+
+	type oldProxyInstance struct {
+		Name        string
+		ListenPort  int
+		Backend     string
+		WafID       string
+		CreatedAt   int64
+		TLSEnabled  int
+		TLSCertFile string
+		TLSKeyFile  string
+	}
+
+	var oldInstances []oldProxyInstance
+	for rows.Next() {
+		var o oldProxyInstance
+		err := rows.Scan(&o.Name, &o.ListenPort, &o.Backend, &o.WafID, &o.CreatedAt, &o.TLSEnabled, &o.TLSCertFile, &o.TLSKeyFile)
+		if err != nil {
+			log.Printf("扫描代理实例失败: %v", err)
+			continue
+		}
+		oldInstances = append(oldInstances, o)
+	}
+
+	if len(oldInstances) == 0 {
+		log.Println("没有需要迁移的代理实例")
+	} else {
+		updateUpgradeProgress("upgrading", 3, 8, fmt.Sprintf("迁移 %d 个代理实例到新结构...", len(oldInstances)))
+		log.Printf("开始迁移 %d 个代理实例...", len(oldInstances))
+
+		updateUpgradeProgress("upgrading", 3, 8, "删除旧实例...")
+		_, err = db.Exec("DELETE FROM proxy_instances")
+		if err != nil {
+			log.Printf("删除旧代理实例失败: %v", err)
+			return err
+		}
+
+		updateUpgradeProgress("upgrading", 3, 8, fmt.Sprintf("创建 %d 个新实例...", len(oldInstances)))
+		for i, o := range oldInstances {
+			newID := fmt.Sprintf("proxy-%d", time.Now().UnixNano()+int64(i))
+			now := time.Now().Unix()
+
+			_, err := db.Exec(`INSERT INTO proxy_instances (id, name, listen_port, backend, fallback_backend, waf_id, created_at, tls_enabled, tls_cert_file, tls_key_file) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				newID, o.Name, o.ListenPort, o.Backend, o.Backend, o.WafID, now, o.TLSEnabled, o.TLSCertFile, o.TLSKeyFile)
+			if err != nil {
+				log.Printf("迁移代理实例 %s 失败: %v", o.Name, err)
+				continue
+			}
+			log.Printf("代理实例 %s 已迁移，新ID: %s", o.Name, newID)
+
+			ruleID := fmt.Sprintf("rule-%d", time.Now().UnixNano()+int64(i)+1000)
+			_, err = db.Exec(`INSERT INTO proxy_domain_rules (id, proxy_id, domain, backend, is_default, rule_type, redirect_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				ruleID, newID, "", o.Backend, 1, "proxy", "", now)
+			if err != nil {
+				log.Printf("为代理实例 %s 创建默认规则失败: %v", o.Name, err)
+			} else {
+				log.Printf("为代理实例 %s 创建默认规则成功", o.Name)
+			}
+		}
+		log.Println("代理实例迁移完成")
+	}
+
+	updateUpgradeProgress("upgrading", 4, 8, "添加 rule_type 字段到域名规则...")
 	_, err = db.Exec("ALTER TABLE proxy_domain_rules ADD COLUMN rule_type TEXT DEFAULT 'proxy'")
 	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
 		log.Printf("添加 rule_type 字段失败: %v", err)
@@ -545,7 +609,7 @@ func upgradeTo14() error {
 	}
 	log.Println("rule_type 字段已添加/已存在")
 
-	updateUpgradeProgress("upgrading", 3, 5, "添加 redirect_url 字段到域名规则...")
+	updateUpgradeProgress("upgrading", 5, 8, "添加 redirect_url 字段到域名规则...")
 	_, err = db.Exec("ALTER TABLE proxy_domain_rules ADD COLUMN redirect_url TEXT")
 	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
 		log.Printf("添加 redirect_url 字段失败: %v", err)
@@ -553,61 +617,11 @@ func upgradeTo14() error {
 	}
 	log.Println("redirect_url 字段已添加/已存在")
 
-	updateUpgradeProgress("upgrading", 4, 5, "迁移现有后端到默认后端...")
-	_, err = db.Exec("UPDATE proxy_instances SET fallback_backend = backend WHERE fallback_backend IS NULL OR fallback_backend = ''")
-	if err != nil {
-		log.Printf("迁移后端数据失败: %v", err)
-		return err
-	}
-	log.Println("现有后端数据已迁移到默认后端")
+	updateUpgradeProgress("upgrading", 6, 8, "清理无用字段...")
+	_, _ = db.Exec("DELETE FROM proxy_instances WHERE name = '' OR name IS NULL")
+	log.Println("无用字段已清理")
 
-	updateUpgradeProgress("upgrading", 5, 6, "为现有防护实例创建默认规则...")
-	rows, err := db.Query("SELECT id, fallback_backend FROM proxy_instances WHERE fallback_backend IS NOT NULL AND fallback_backend != ''")
-	if err != nil {
-		log.Printf("查询现有防护实例失败: %v", err)
-		return err
-	}
-	defer rows.Close()
-
-	createdAt := time.Now().UnixMilli()
-	for rows.Next() {
-		var id, fallbackBackend string
-		if err := rows.Scan(&id, &fallbackBackend); err != nil {
-			log.Printf("扫描防护实例失败: %v", err)
-			continue
-		}
-
-		checkStmt := "SELECT COUNT(*) FROM proxy_domain_rules WHERE proxy_id = ? AND is_default = 1"
-		var count int
-		if err := db.QueryRow(checkStmt, id).Scan(&count); err != nil {
-			log.Printf("检查默认规则失败: %v", err)
-			continue
-		}
-
-		if count == 0 {
-			ruleId := fmt.Sprintf("default-rule-%d-%s", time.Now().UnixNano(), id[:8])
-			_, err := db.Exec(
-				"INSERT INTO proxy_domain_rules (id, proxy_id, domain, backend, is_default, rule_type, created_at) VALUES (?, ?, '', ?, 1, 'proxy', ?)",
-				ruleId, id, fallbackBackend, createdAt,
-			)
-			if err != nil {
-				log.Printf("创建默认规则失败: %v", err)
-				continue
-			}
-			log.Printf("为防护实例 %s 创建默认规则: %s", id, fallbackBackend)
-		}
-	}
-	log.Println("默认规则创建完成")
-
-	updateUpgradeProgress("finalizing", 6, 6, "更新数据库版本...")
-	_, err = db.Exec("DELETE FROM db_version")
-	if err != nil && !strings.Contains(err.Error(), "no such table") {
-		log.Printf("清理旧版本记录失败: %v", err)
-	}
-	_, err = db.Exec("DELETE FROM sqlite_sequence WHERE name='db_version'")
-	if err != nil {
-		log.Printf("重置自增序列失败(忽略): %v", err)
-	}
+	updateUpgradeProgress("finalizing", 7, 8, "更新数据库版本...")
 	err = setDBVersion("1.4")
 	if err != nil {
 		return fmt.Errorf("更新数据库版本失败: %w", err)
@@ -2032,24 +2046,24 @@ func (ic *ipCheckHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	
 	var instanceName string
 	var forwardInfo string
-	var domainRules []*DomainRule
 	var matchedRule *DomainRule
 	if ic.proxyID != "" {
 		proxyMutex.RLock()
 		if proxy, exists := proxyInstances[ic.proxyID]; exists {
 			instanceName = proxy.Name
-			domainRules = proxy.DomainRules
 			host := r.Host
 			if idx := strings.Index(host, ":"); idx != -1 {
 				host = host[:idx]
 			}
 			matchedRule = proxy.findBackendByDomain(host)
+			log.Printf("[域名路由] 匹配结果: host=%s, ruleType=%s, backend=%s, redirectUrl=%s", host, matchedRule.RuleType, matchedRule.Backend, matchedRule.RedirectURL)
 			forwardInfo = fmt.Sprintf("http://%d -> %s", proxy.ListenPort, matchedRule.Backend)
 		}
 		proxyMutex.RUnlock()
 	}
 
-	if matchedRule != nil && len(domainRules) > 0 {
+	if matchedRule != nil {
+		log.Printf("[域名路由] 处理请求: host=%s, ruleType=%s", r.Host, matchedRule.RuleType)
 		switch matchedRule.RuleType {
 		case "redirect":
 			log.Printf("[域名路由] 执行重定向: %s -> %s", r.Host, matchedRule.RedirectURL)
@@ -2592,6 +2606,51 @@ func (wh *wafHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			City:      city,
 		})
 		return
+	}
+
+	var matchedRule *DomainRule
+	if wh.proxyID != "" {
+		proxyMutex.RLock()
+		if proxy, exists := proxyInstances[wh.proxyID]; exists {
+			host := r.Host
+			if idx := strings.Index(host, ":"); idx != -1 {
+				host = host[:idx]
+			}
+			matchedRule = proxy.findBackendByDomain(host)
+			log.Printf("[域名路由-WAF] 匹配结果: host=%s, ruleType=%s, backend=%s, redirectUrl=%s", host, matchedRule.RuleType, matchedRule.Backend, matchedRule.RedirectURL)
+			forwardInfo = fmt.Sprintf("http://%d -> %s", proxy.ListenPort, matchedRule.Backend)
+		}
+		proxyMutex.RUnlock()
+	}
+
+	if matchedRule != nil {
+		log.Printf("[域名路由-WAF] 处理请求: host=%s, ruleType=%s", r.Host, matchedRule.RuleType)
+		switch matchedRule.RuleType {
+		case "redirect":
+			log.Printf("[域名路由-WAF] 执行重定向: %s -> %s", r.Host, matchedRule.RedirectURL)
+			http.Redirect(w, r, matchedRule.RedirectURL, http.StatusTemporaryRedirect)
+			return
+		case "close":
+			log.Printf("[域名路由-WAF] 关闭连接: %s", r.Host)
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				conn.Close()
+			}
+			return
+		default:
+			proxy, err := url.Parse(matchedRule.Backend)
+			if err == nil {
+				rp := httputil.NewSingleHostReverseProxy(proxy)
+				rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+					log.Printf("域名路由代理错误: %v", err)
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					w.WriteHeader(http.StatusBadGateway)
+					http.ServeFile(w, r, "web/html/502.html")
+				}
+				rp.ServeHTTP(w, r)
+				return
+			}
+		}
 	}
 
 	r.Body = &statsRequestBody{ReadCloser: r.Body}
@@ -3422,11 +3481,6 @@ func getSequentialUpgradeSteps(currentVersion string) []string {
 func performSequentialUpgrade(fromVersion string, steps []string) error {
 	initUpgradeProgress()
 
-	_, err := db.Exec("DELETE FROM db_version")
-	if err != nil && !strings.Contains(err.Error(), "no such table") {
-		log.Printf("清理旧版本记录失败: %v", err)
-	}
-
 	currentVersion := fromVersion
 	totalSteps := len(steps)
 
@@ -3459,14 +3513,7 @@ func performSequentialUpgrade(fromVersion string, steps []string) error {
 	updateUpgradeProgress("completed", totalSteps, totalSteps, "所有升级完成")
 	setUpgradeCompleted()
 	log.Printf("数据库升级完成: %s -> %s", fromVersion, currentDBVersion)
-
-	log.Println("合并数据库...")
-	if _, err := db.Exec("VACUUM"); err != nil {
-		log.Printf("合并数据库失败: %v", err)
-	} else {
-		log.Println("数据库合并完成")
-	}
-
+	
 	log.Println("数据库升级完成，3秒后自动重启以应用新数据...")
 	time.Sleep(3 * time.Second)
 	restartProgram()
@@ -4689,13 +4736,14 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == "PUT" {
 		var req struct {
-			Name         string `json:"name"`
-			ListenPort   int    `json:"listenPort"`
-			Backend      string `json:"backend"`
-			WAFID        string `json:"wafId"`
-			TLSEnabled   bool   `json:"tlsEnabled"`
-			TLSCertFile  string `json:"tlsCertFile"`
-			TLSKeyFile   string `json:"tlsKeyFile"`
+			Name            string `json:"name"`
+			ListenPort      int    `json:"listenPort"`
+			Backend         string `json:"backend"`
+			FallbackBackend string `json:"fallbackBackend"`
+			WAFID           string `json:"wafId"`
+			TLSEnabled      bool   `json:"tlsEnabled"`
+			TLSCertFile     string `json:"tlsCertFile"`
+			TLSKeyFile      string `json:"tlsKeyFile"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -4767,8 +4815,8 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 		if oldPort == req.ListenPort && oldWAFID == req.WAFID && req.Backend == oldBackend && req.Name == oldName && oldTLSEnabled == req.TLSEnabled && oldTLSCertFile == req.TLSCertFile && oldTLSKeyFile == req.TLSKeyFile {
 			log.Printf("更新代理服务器 %s: 无需重启", instance.Name)
 
-			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, waf_id = ?, tls_enabled = ?, tls_cert_file = ?, tls_key_file = ? WHERE id = ?",
-				req.Name, req.ListenPort, req.Backend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, id)
+			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, fallback_backend = ?, waf_id = ?, tls_enabled = ?, tls_cert_file = ?, tls_key_file = ? WHERE id = ?",
+				req.Name, req.ListenPort, req.Backend, req.FallbackBackend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, id)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{
@@ -4780,6 +4828,7 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 
 			instance.Name = req.Name
 			instance.Backend = req.Backend
+			instance.FallbackBackend = req.FallbackBackend
 			instance.WAFID = req.WAFID
 			instance.TLSEnabled = req.TLSEnabled
 			instance.TLSCertFile = req.TLSCertFile
@@ -4805,8 +4854,8 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 				time.Sleep(600 * time.Millisecond)
 			}
 
-			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, waf_id = ?, tls_enabled = ?, tls_cert_file = ?, tls_key_file = ? WHERE id = ?",
-				req.Name, req.ListenPort, req.Backend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, id)
+			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, fallback_backend = ?, waf_id = ?, tls_enabled = ?, tls_cert_file = ?, tls_key_file = ? WHERE id = ?",
+				req.Name, req.ListenPort, req.Backend, req.FallbackBackend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, id)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{
@@ -4818,6 +4867,7 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 
 			instance.Name = req.Name
 			instance.Backend = req.Backend
+			instance.FallbackBackend = req.FallbackBackend
 			instance.WAFID = req.WAFID
 			instance.TLSEnabled = req.TLSEnabled
 			instance.TLSCertFile = req.TLSCertFile
@@ -4930,8 +4980,8 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, waf_id = ?, tls_enabled = ?, tls_cert_file = ?, tls_key_file = ? WHERE id = ?",
-				req.Name, req.ListenPort, req.Backend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, id)
+			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, fallback_backend = ?, waf_id = ?, tls_enabled = ?, tls_cert_file = ?, tls_key_file = ? WHERE id = ?",
+				req.Name, req.ListenPort, req.Backend, req.FallbackBackend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, id)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{
@@ -4944,6 +4994,7 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 			instance.Name = req.Name
 			instance.ListenPort = req.ListenPort
 			instance.Backend = req.Backend
+			instance.FallbackBackend = req.FallbackBackend
 			instance.WAFID = req.WAFID
 			instance.TLSEnabled = req.TLSEnabled
 			instance.TLSCertFile = req.TLSCertFile
@@ -5114,6 +5165,7 @@ func handleDomainRules(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		log.Printf("[域名规则] 收到更新请求: id=%s, domain=%s, backend=%s, isDefault=%v, ruleType=%s, redirectUrl=%s", req.ID, req.Domain, req.Backend, req.IsDefault, req.RuleType, req.RedirectURL)
 
 		var proxyID string
 		err := db.QueryRow("SELECT proxy_id FROM proxy_domain_rules WHERE id = ?", req.ID).Scan(&proxyID)
@@ -5159,6 +5211,12 @@ func handleDomainRules(w http.ResponseWriter, r *http.Request) {
 		proxyMutex.RLock()
 		if inst, ok := proxyInstances[proxyID]; ok {
 			inst.DomainRules = loadDomainRules(proxyID)
+			log.Printf("[域名规则] 已更新内存中的规则，当前规则数: %d", len(inst.DomainRules))
+			for i, r := range inst.DomainRules {
+				log.Printf("[域名规则]   规则[%d]: id=%s, domain=%s, isDefault=%v, ruleType=%s", i, r.ID, r.Domain, r.IsDefault, r.RuleType)
+			}
+		} else {
+			log.Printf("[域名规则] 警告: 找不到 proxyID=%s 的代理实例", proxyID)
 		}
 		proxyMutex.RUnlock()
 

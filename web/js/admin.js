@@ -413,20 +413,6 @@ function formatUTCTimeToLocal(utcTimeString) {
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
-function formatTime(timestamp) {
-    if (!timestamp) return '未知';
-    const num = typeof timestamp === 'string' ? parseInt(timestamp) : timestamp;
-    if (isNaN(num)) return '未知';
-    const date = new Date(num >= 1e12 ? num : num * 1000);
-    const y = date.getFullYear();
-    const m = String(date.getMonth() + 1).padStart(2, '0');
-    const d = String(date.getDate()).padStart(2, '0');
-    const h = String(date.getHours()).padStart(2, '0');
-    const min = String(date.getMinutes()).padStart(2, '0');
-    const s = String(date.getSeconds()).padStart(2, '0');
-    return `${y}-${m}-${d} ${h}:${min}:${s}`;
-}
-
 function showAlert(title, message) {
     document.getElementById('alertTitle').textContent = title;
     document.getElementById('alertMessage').textContent = message;
@@ -562,32 +548,26 @@ async function performDatabaseUpgrade() {
         
         try {
             const completedResult = await pollUpgradeProgress();
-
+            
             if (completedResult.message && completedResult.message.includes('完成')) {
-                setUpgradeProgress(100, '升级成功，页面将在6秒后刷新...');
+                setUpgradeProgress(100, '数据库升级成功');
                 setUpgradeStep('stepUpgrade', 'done');
                 setUpgradeStep('stepComplete', 'done');
                 document.getElementById('upgradeIcon').textContent = '✅';
-                document.getElementById('upgradeMessage').style.color = 'var(--danger-red)';
-                setTimeout(() => location.reload(), 6000);
             } else {
-                setUpgradeProgress(100, '升级成功，页面将在6秒后刷新...');
+                setUpgradeProgress(100, completedResult.step || '升级完成');
                 setUpgradeStep('stepUpgrade', 'done');
                 setUpgradeStep('stepComplete', 'done');
                 document.getElementById('upgradeIcon').textContent = '✅';
-                document.getElementById('upgradeMessage').style.color = 'var(--danger-red)';
-                setTimeout(() => location.reload(), 6000);
             }
         } catch (pollError) {
-            setUpgradeProgress(100, '升级成功，页面将在6秒后刷新...');
+            setUpgradeProgress(100, '升级完成');
             setUpgradeStep('stepUpgrade', 'done');
             setUpgradeStep('stepComplete', 'done');
             document.getElementById('upgradeIcon').textContent = '✅';
-            document.getElementById('upgradeMessage').style.color = 'var(--danger-red)';
-            setTimeout(() => location.reload(), 6000);
             console.error('轮询进度失败:', pollError);
         }
-
+        
         enableUpgradeCloseBtn();
         
     } catch (error) {
@@ -752,7 +732,7 @@ function renderWAFInstances() {
                 </div>
                 <div class="instance-grid-item">
                     <div class="instance-grid-label">创建时间</div>
-                    <div class="instance-grid-value">${formatTime(instance.createdAt)}</div>
+                    <div class="instance-grid-value">${instance.createdAt}</div>
                 </div>
                 <div class="instance-grid-item">
                     <div class="instance-grid-label">绑定应用</div>
@@ -1377,7 +1357,7 @@ function renderCertificates() {
             statusText = '失败';
         }
 
-        const expiresAt = formatTime(cert.expiresAt);
+        const expiresAt = cert.expiresAt ? new Date(cert.expiresAt * 1000).toLocaleString('zh-CN') : '未知';
         const autoRenewBadge = cert.autoRenew ? '<span class="instance-badge" style="background: rgba(52, 168, 83, 0.1); color: #34a853;">自动续期</span>' : '';
 
         div.innerHTML = `
@@ -1394,7 +1374,7 @@ function renderCertificates() {
                     <div class="instance-grid-label">域名</div>
                     <div class="instance-grid-value" style="position: relative; cursor: pointer;" onmouseover="this.querySelector('.domain-tooltip').style.display='block'" onmouseout="this.querySelector('.domain-tooltip').style.display='none'">
                         <span style="display: inline-block; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;">${cert.domains.split(',')[0]}</span>${cert.domains.includes(',') ? '<span style="color: var(--primary-blue);"> (+' + (cert.domains.split(',').length - 1) + ')</span>' : ''}
-                        <div class="domain-tooltip" style="display: none; position: absolute; top: 100%; left: 0; background: #fff; border: 1px solid var(--border-light); border-radius: 6px; padding: 8px 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 100; white-space: pre-line; font-size: 13px; min-width: 150px;">${cert.domains.replace(/,/g, '\n')}</div>
+                        <div class="domain-tooltip" style="display: none; position: absolute; top: 100%; left: 0; background: #fff; border: 1px solid var(--border-light); border-radius: 6px; padding: 8px 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 100; white-space: pre-line; font-size: 13px; min-width: 150px;">${cert.domains}</div>
                     </div>
                 </div>
                 <div class="instance-grid-item">
@@ -1600,8 +1580,8 @@ function viewCertDetail(id) {
         return;
     }
 
-    const expiresAt = formatTime(cert.expiresAt);
-    const createdAt = formatTime(cert.createdAt);
+    const expiresAt = cert.expiresAt ? new Date(cert.expiresAt * 1000).toLocaleString('zh-CN') : '未知';
+    const createdAt = cert.createdAt ? new Date(parseInt(cert.createdAt) * 1000).toLocaleString('zh-CN') : '未知';
 
     const content = `
         <div style="display: grid; gap: 16px;">
@@ -1694,7 +1674,7 @@ function editCertificate(id) {
     document.getElementById('certEditName').value = cert.name;
     document.getElementById('certEditProvider').value = cert.provider || 'letsencrypt';
     document.getElementById('certEditCloudflareToken').value = cert.cloudflareApiToken || '';
-    document.getElementById('certEditDomains').value = (cert.domains || '').replace(/,/g, '\n');
+    document.getElementById('certEditDomains').value = cert.domains || '';
     document.getElementById('certEditAutoRenew').checked = cert.autoRenew === true || cert.autoRenew === 1;
     document.getElementById('certApplyForm').style.display = 'block';
     document.getElementById('certLogContainer').style.display = 'none';
@@ -1876,7 +1856,7 @@ function renderPortForwardInstances() {
                 </div>
                 <div class="instance-grid-item">
                     <div class="instance-grid-label">创建时间</div>
-                    <div class="instance-grid-value">${formatTime(instance.createdAt)}</div>
+                    <div class="instance-grid-value">${instance.createdAt}</div>
                 </div>
             </div>
             <div class="instance-actions">
