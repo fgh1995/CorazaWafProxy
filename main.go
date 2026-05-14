@@ -48,7 +48,7 @@ import (
 )
 
 const frontendVersion = "v0.4.5"
-const localVersionInt = 4050 // 版本整数值，用于对比
+const localVersionInt = 4051 // 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
@@ -2044,6 +2044,8 @@ type ipCheckHandler struct {
 func (ic *ipCheckHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cleanIP := getCleanIP(r.RemoteAddr)
 	
+	log.Printf("[ipCheckHandler] 处理请求: proxyID=%s, host=%s", ic.proxyID, r.Host)
+	
 	var instanceName string
 	var forwardInfo string
 	var matchedRule *DomainRule
@@ -2077,7 +2079,18 @@ func (ic *ipCheckHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		default:
-			proxy, err := url.Parse(matchedRule.Backend)
+			backend := matchedRule.Backend
+			if backend == "" {
+				proxyMutex.RLock()
+				if p, exists := proxyInstances[ic.proxyID]; exists {
+					backend = p.FallbackBackend
+					if backend == "" {
+						backend = p.Backend
+					}
+				}
+				proxyMutex.RUnlock()
+			}
+			proxy, err := url.Parse(backend)
 			if err == nil {
 				rp := httputil.NewSingleHostReverseProxy(proxy)
 				rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
@@ -2090,6 +2103,10 @@ func (ic *ipCheckHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+	
+	if matchedRule == nil {
+		log.Printf("[ipCheckHandler] matchedRule为nil，使用IP规则处理")
 	}
 	
 	// 构建完整的URL
@@ -2638,7 +2655,18 @@ func (wh *wafHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		default:
-			proxy, err := url.Parse(matchedRule.Backend)
+			backend := matchedRule.Backend
+			if backend == "" {
+				proxyMutex.RLock()
+				if p, exists := proxyInstances[wh.proxyID]; exists {
+					backend = p.FallbackBackend
+					if backend == "" {
+						backend = p.Backend
+					}
+				}
+				proxyMutex.RUnlock()
+			}
+			proxy, err := url.Parse(backend)
 			if err == nil {
 				rp := httputil.NewSingleHostReverseProxy(proxy)
 				rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
@@ -2652,6 +2680,12 @@ func (wh *wafHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
+	proxyMutex.RLock()
+	if p, exists := proxyInstances[wh.proxyID]; exists {
+		forwardInfo = fmt.Sprintf("http://%d -> %s (fallback)", p.ListenPort, p.FallbackBackend)
+	}
+	proxyMutex.RUnlock()
 
 	r.Body = &statsRequestBody{ReadCloser: r.Body}
 	wh.next.ServeHTTP(statsRW, r)
@@ -4802,15 +4836,19 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 			http.ServeFile(w, r, "web/html/502.html")
 		}
 
-		var handler http.Handler = instance.Proxy
+		var handler http.Handler = proxy
 		
 		if req.WAFID != "" {
 			wafMutex.RLock()
 			if wafInst, exists := wafInstances[req.WAFID]; exists {
-				handler = &wafHandler{next: instance.Proxy, waf: wafInst.WAF, proxyID: instance.ID}
+				handler = &wafHandler{next: proxy, waf: wafInst.WAF, proxyID: instance.ID}
 			}
 			wafMutex.RUnlock()
+		} else {
+			handler = &ipCheckHandler{next: proxy, proxyID: instance.ID}
 		}
+		
+		log.Printf("[更新代理] WAF绑定变化检测: oldWAFID=%s, req.WAFID=%s, 使用handler=%T", oldWAFID, req.WAFID, handler)
 
 		if oldPort == req.ListenPort && oldWAFID == req.WAFID && req.Backend == oldBackend && req.Name == oldName && oldTLSEnabled == req.TLSEnabled && oldTLSCertFile == req.TLSCertFile && oldTLSKeyFile == req.TLSKeyFile {
 			log.Printf("更新代理服务器 %s: 无需重启", instance.Name)
