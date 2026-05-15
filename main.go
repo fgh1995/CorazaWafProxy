@@ -47,8 +47,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.5"
-const localVersionInt = 4051 // 版本整数值，用于对比
+const frontendVersion = "v0.4.6"
+const localVersionInt = 4060 // 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
@@ -180,11 +180,11 @@ func getUTCTimestamp() int64 {
 	return time.Now().UTC().Unix()
 }
 
-const currentDBVersion = "1.4"
+const currentDBVersion = "1.5"
 
 func getCurrentDBVersion() string {
 	var version string
-	err := db.QueryRow("SELECT version FROM db_version ORDER BY id DESC LIMIT 1").Scan(&version)
+	err := db.QueryRow("SELECT version FROM db_version WHERE id = 1").Scan(&version)
 	if err != nil {
 		return "1.0"
 	}
@@ -192,8 +192,24 @@ func getCurrentDBVersion() string {
 }
 
 func setDBVersion(version string) error {
-	_, err := db.Exec("INSERT INTO db_version (version, updated_at) VALUES (?, ?)", version, getUTCTimestamp())
-	return err
+	// 先尝试更新 id 为 1 的记录
+	result, err := db.Exec("UPDATE db_version SET version = ?, updated_at = ? WHERE id = 1", version, getUTCTimestamp())
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	// 如果没有更新任何记录（说明不存在 id 为 1 的记录），则插入新记录
+	if rowsAffected == 0 {
+		_, err := db.Exec("INSERT INTO db_version (id, version, updated_at) VALUES (1, ?, ?)", version, getUTCTimestamp())
+		return err
+	}
+
+	return nil
 }
 
 var upgradeProgress struct {
@@ -631,6 +647,48 @@ func upgradeTo14() error {
 	return nil
 }
 
+func upgradeTo15() error {
+	log.Println("升级到版本 1.5...")
+	updateUpgradeProgress("upgrading", 0, 4, "添加 force_https 字段...")
+
+	_, err := db.Exec("ALTER TABLE proxy_instances ADD COLUMN force_https INTEGER DEFAULT 0")
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		log.Printf("添加 force_https 字段失败: %v", err)
+		return err
+	}
+	log.Println("force_https 字段已添加/已存在")
+
+	updateUpgradeProgress("upgrading", 1, 4, "添加 http_listen_port 字段...")
+	_, err = db.Exec("ALTER TABLE proxy_instances ADD COLUMN http_listen_port INTEGER DEFAULT 0")
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		log.Printf("添加 http_listen_port 字段失败: %v", err)
+		return err
+	}
+	log.Println("http_listen_port 字段已添加/已存在")
+
+	updateUpgradeProgress("upgrading", 2, 4, "添加 fallback_backend 字段（如果不存在）...")
+	_, err = db.Exec("ALTER TABLE proxy_instances ADD COLUMN fallback_backend TEXT")
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		log.Printf("添加 fallback_backend 字段失败: %v", err)
+	}
+
+	updateUpgradeProgress("upgrading", 3, 4, "清理旧的 db_version 记录...")
+	_, err = db.Exec("DELETE FROM db_version WHERE id != 1")
+	if err != nil {
+		log.Printf("清理旧的 db_version 记录失败: %v", err)
+	}
+	log.Println("旧的 db_version 记录已清理")
+
+	updateUpgradeProgress("finalizing", 4, 4, "更新数据库版本...")
+	err = setDBVersion("1.5")
+	if err != nil {
+		return fmt.Errorf("更新数据库版本失败: %w", err)
+	}
+
+	log.Println("升级到 1.5 完成")
+	return nil
+}
+
 type User struct {
 	ID       int    `json:"id"`
 	Username string `json:"username"`
@@ -660,6 +718,9 @@ type ProxyInstance struct {
 	TLSEnabled       bool     `json:"tlsEnabled"`
 	TLSCertFile      string   `json:"tlsCertFile"`
 	TLSKeyFile       string   `json:"tlsKeyFile"`
+	ForceHTTPS       bool     `json:"forceHttps"`
+	HTTPListenPort   int      `json:"httpListenPort"`
+	HTTPServer       *http.Server `json:"-"`
 	DomainRules      []*DomainRule `json:"domainRules"`
 	CreatedAt        string `json:"createdAt"`
 }
@@ -907,10 +968,13 @@ func initDB() error {
 		name TEXT NOT NULL,
 		listen_port INTEGER NOT NULL,
 		backend TEXT NOT NULL,
+		fallback_backend TEXT,
 		waf_id TEXT,
 		tls_enabled INTEGER DEFAULT 0,
 		tls_cert_file TEXT,
 		tls_key_file TEXT,
+		force_https INTEGER DEFAULT 0,
+		http_listen_port INTEGER DEFAULT 0,
 		created_at INTEGER NOT NULL,
 		FOREIGN KEY (waf_id) REFERENCES waf_instances(id)
 	);
@@ -1550,9 +1614,28 @@ func createWAFInstance(name, mode string, rules []string) (*WAFInstance, error) 
 	return instance, nil
 }
 
-func createProxyInstance(name string, listenPort int, backend, wafID string, tlsEnabled bool, tlsCertFile, tlsKeyFile string, fallbackBackend string) (*ProxyInstance, error) {
+func createProxyInstance(name string, listenPort int, backend, wafID string, tlsEnabled bool, tlsCertFile, tlsKeyFile string, fallbackBackend string, forceHTTPS bool, httpListenPort int) (*ProxyInstance, error) {
+	// 验证监听端口
+	if listenPort < 1 || listenPort > 65535 {
+		return nil, fmt.Errorf("监听端口必须在1-65535之间")
+	}
+
+	// 验证HTTP端口（如果启用了强制HTTPS）
+	if forceHTTPS {
+		if httpListenPort < 1 || httpListenPort > 65535 {
+			return nil, fmt.Errorf("HTTP监听端口必须在1-65535之间")
+		}
+		if httpListenPort == listenPort {
+			return nil, fmt.Errorf("HTTP监听端口不能和主监听端口相同")
+		}
+	}
+
 	if listenPort == adminPort {
 		return nil, fmt.Errorf("端口 %d 与管理服务端口冲突", listenPort)
+	}
+
+	if forceHTTPS && httpListenPort == adminPort {
+		return nil, fmt.Errorf("HTTP端口 %d 与管理服务端口冲突", httpListenPort)
 	}
 
 	proxyMutex.RLock()
@@ -1560,6 +1643,10 @@ func createProxyInstance(name string, listenPort int, backend, wafID string, tls
 		if inst.ListenPort == listenPort {
 			proxyMutex.RUnlock()
 			return nil, fmt.Errorf("端口 %d 已被防护应用占用", listenPort)
+		}
+		if forceHTTPS && inst.HTTPListenPort == httpListenPort {
+			proxyMutex.RUnlock()
+			return nil, fmt.Errorf("HTTP端口 %d 已被防护应用占用", httpListenPort)
 		}
 	}
 	proxyMutex.RUnlock()
@@ -1569,6 +1656,10 @@ func createProxyInstance(name string, listenPort int, backend, wafID string, tls
 		if inst.ListenPort == listenPort {
 			portForwardMutex.RUnlock()
 			return nil, fmt.Errorf("端口 %d 已被端口转发占用", listenPort)
+		}
+		if forceHTTPS && inst.ListenPort == httpListenPort {
+			portForwardMutex.RUnlock()
+			return nil, fmt.Errorf("HTTP端口 %d 已被端口转发占用", httpListenPort)
 		}
 	}
 	portForwardMutex.RUnlock()
@@ -1594,10 +1685,14 @@ func createProxyInstance(name string, listenPort int, backend, wafID string, tls
 	if tlsEnabled {
 		tlsEnabledInt = 1
 	}
+	forceHTTPSInt := 0
+	if forceHTTPS {
+		forceHTTPSInt = 1
+	}
 
 	_, err = db.Exec(
-		"INSERT INTO proxy_instances (id, name, listen_port, backend, fallback_backend, waf_id, created_at, tls_enabled, tls_cert_file, tls_key_file) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		id, name, listenPort, backend, fallbackBackend, wafID, createdAt, tlsEnabledInt, tlsCertFile, tlsKeyFile,
+		"INSERT INTO proxy_instances (id, name, listen_port, backend, fallback_backend, waf_id, created_at, tls_enabled, tls_cert_file, tls_key_file, force_https, http_listen_port) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		id, name, listenPort, backend, fallbackBackend, wafID, createdAt, tlsEnabledInt, tlsCertFile, tlsKeyFile, forceHTTPSInt, httpListenPort,
 	)
 	if err != nil {
 		return nil, err
@@ -1614,6 +1709,8 @@ func createProxyInstance(name string, listenPort int, backend, wafID string, tls
 		TLSEnabled:      tlsEnabled,
 		TLSCertFile:     tlsCertFile,
 		TLSKeyFile:      tlsKeyFile,
+		ForceHTTPS:      forceHTTPS,
+		HTTPListenPort:  httpListenPort,
 		DomainRules:     []*DomainRule{},
 		CreatedAt:       fmt.Sprintf("%d", createdAt),
 	}
@@ -1702,10 +1799,70 @@ func createProxyInstance(name string, listenPort int, backend, wafID string, tls
 		}
 	}()
 
+	// 如果启用了强制HTTPS，先测试HTTP端口是否可用
+	if instance.ForceHTTPS && instance.HTTPListenPort > 0 && instance.TLSEnabled {
+		// 先尝试监听HTTP端口测试是否可用
+		testHTTPListener, err := net.Listen("tcp", fmt.Sprintf(":%d", instance.HTTPListenPort))
+		if err != nil {
+			// 测试失败，清理已创建的代理实例
+			if instance.Server != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				instance.Server.Shutdown(ctx)
+			}
+			db.Exec("DELETE FROM proxy_instances WHERE id = ?", instance.ID)
+			proxyMutex.Lock()
+			delete(proxyInstances, instance.ID)
+			proxyMutex.Unlock()
+			return nil, fmt.Errorf("HTTP端口 %d 已被占用", instance.HTTPListenPort)
+		}
+		// 立即关闭测试监听
+		testHTTPListener.Close()
+
+		httpsPort := instance.ListenPort
+		redirectHandler := func(w http.ResponseWriter, r *http.Request) {
+			// 构建重定向URL
+			host := r.Host
+			// 移除可能存在的端口
+			if idx := strings.Index(host, ":"); idx != -1 {
+				host = host[:idx]
+			}
+			// 添加HTTPS端口
+			targetURL := fmt.Sprintf("https://%s:%d%s", host, httpsPort, r.URL.RequestURI())
+			// 使用307重定向
+			http.Redirect(w, r, targetURL, http.StatusTemporaryRedirect)
+		}
+
+		instance.HTTPServer = &http.Server{
+			Addr:    fmt.Sprintf(":%d", instance.HTTPListenPort),
+			Handler: http.HandlerFunc(redirectHandler),
+		}
+
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			log.Printf("HTTP重定向服务器 %s 已启动在端口 %d -> HTTPS %d", instance.Name, instance.HTTPListenPort, instance.ListenPort)
+			if err := instance.HTTPServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("HTTP重定向服务器 %s 运行错误: %v", instance.Name, err)
+			} else if err == http.ErrServerClosed {
+				log.Printf("HTTP重定向服务器 %s 已关闭", instance.Name)
+			}
+		}()
+	}
+
 	return instance, nil
 }
 
 func createPortForwardInstance(name, protocol string, listenPort int, targetAddress string, targetPort int, ipMode, actionMode string) (*PortForwardInstance, error) {
+	// 验证监听端口
+	if listenPort < 1 || listenPort > 65535 {
+		return nil, fmt.Errorf("监听端口必须在1-65535之间")
+	}
+
+	// 验证目标端口
+	if targetPort < 1 || targetPort > 65535 {
+		return nil, fmt.Errorf("目标端口必须在1-65535之间")
+	}
+
 	if listenPort == adminPort {
 		return nil, fmt.Errorf("端口 %d 与管理服务端口冲突", listenPort)
 	}
@@ -1752,6 +1909,16 @@ func createPortForwardInstance(name, protocol string, listenPort int, targetAddr
 		Status:        "running",
 		CreatedAt:     fmt.Sprintf("%d", createdAt),
 	}
+
+	// 先测试端口是否可以监听
+	testListener, err := net.Listen("tcp", fmt.Sprintf(":%d", listenPort))
+	if err != nil {
+		// 清理已创建的数据库记录
+		db.Exec("DELETE FROM port_forward_instances WHERE id = ?", id)
+		return nil, fmt.Errorf("端口 %d 已被占用", listenPort)
+	}
+	// 立即关闭测试监听
+	testListener.Close()
 
 	portForwardMutex.Lock()
 	portForwardInstances[id] = instance
@@ -3124,7 +3291,7 @@ func (p *ProxyInstance) findBackendByDomain(host string) *DomainRule {
 }
 
 func loadProxyInstancesFromDB() error {
-	rows, err := db.Query("SELECT id, name, listen_port, backend, fallback_backend, waf_id, created_at, tls_enabled, tls_cert_file, tls_key_file FROM proxy_instances")
+	rows, err := db.Query("SELECT id, name, listen_port, backend, fallback_backend, waf_id, created_at, tls_enabled, tls_cert_file, tls_key_file, force_https, http_listen_port FROM proxy_instances")
 	if err != nil {
 		return err
 	}
@@ -3134,8 +3301,10 @@ func loadProxyInstancesFromDB() error {
 		var id, name, backend, createdAt string
 		var listenPort int
 		var tlsEnabled int
+		var forceHTTPS int
+		var httpListenPort int
 		var tlsCertFileNull, tlsKeyFileNull, wafIDNull, fallbackBackendNull sql.NullString
-		err := rows.Scan(&id, &name, &listenPort, &backend, &fallbackBackendNull, &wafIDNull, &createdAt, &tlsEnabled, &tlsCertFileNull, &tlsKeyFileNull)
+		err := rows.Scan(&id, &name, &listenPort, &backend, &fallbackBackendNull, &wafIDNull, &createdAt, &tlsEnabled, &tlsCertFileNull, &tlsKeyFileNull, &forceHTTPS, &httpListenPort)
 		if err != nil {
 			log.Printf("加载代理实例失败: %v", err)
 			continue
@@ -3183,6 +3352,8 @@ func loadProxyInstancesFromDB() error {
 			TLSEnabled:      tlsEnabled == 1,
 			TLSCertFile:     tlsCertFile,
 			TLSKeyFile:      tlsKeyFile,
+			ForceHTTPS:      forceHTTPS == 1,
+			HTTPListenPort:  httpListenPort,
 			DomainRules:     loadDomainRules(id),
 			CreatedAt:       createdAt,
 		}
@@ -3262,6 +3433,38 @@ func loadProxyInstancesFromDB() error {
 				log.Printf("代理服务器 %s 已关闭", instance.Name)
 			}
 		}()
+
+		// 如果启用了强制HTTPS，启动HTTP重定向服务器
+		if instance.ForceHTTPS && instance.HTTPListenPort > 0 && instance.TLSEnabled {
+			httpsPort := instance.ListenPort
+			redirectHandler := func(w http.ResponseWriter, r *http.Request) {
+				// 构建重定向URL
+				host := r.Host
+				// 移除可能存在的端口
+				if idx := strings.Index(host, ":"); idx != -1 {
+					host = host[:idx]
+				}
+				// 添加HTTPS端口
+				targetURL := fmt.Sprintf("https://%s:%d%s", host, httpsPort, r.URL.RequestURI())
+				// 使用307重定向
+				http.Redirect(w, r, targetURL, http.StatusTemporaryRedirect)
+			}
+
+			instance.HTTPServer = &http.Server{
+				Addr:    fmt.Sprintf(":%d", instance.HTTPListenPort),
+				Handler: http.HandlerFunc(redirectHandler),
+			}
+
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				log.Printf("HTTP重定向服务器 %s 已启动在端口 %d -> HTTPS %d", instance.Name, instance.HTTPListenPort, instance.ListenPort)
+				if err := instance.HTTPServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					log.Printf("HTTP重定向服务器 %s 运行错误: %v", instance.Name, err)
+				} else if err == http.ErrServerClosed {
+					log.Printf("HTTP重定向服务器 %s 已关闭", instance.Name)
+				}
+			}()
+		}
 	}
 
 	return nil
@@ -3495,7 +3698,7 @@ func handleDBUpgrade(w http.ResponseWriter, r *http.Request) {
 
 func getSequentialUpgradeSteps(currentVersion string) []string {
 	var steps []string
-	versions := []string{"1.0", "1.1", "1.2", "1.3", "1.4"}
+	versions := []string{"1.0", "1.1", "1.2", "1.3", "1.4", "1.5"}
 	currentIdx := 0
 	
 	for i, v := range versions {
@@ -3532,6 +3735,8 @@ func performSequentialUpgrade(fromVersion string, steps []string) error {
 			err = upgradeTo13()
 		case "1.4":
 			err = upgradeTo14()
+		case "1.5":
+			err = upgradeTo15()
 		default:
 			err = fmt.Errorf("未知的升级目标版本: %s", targetVersion)
 		}
@@ -4714,6 +4919,8 @@ func handleProxyInstances(w http.ResponseWriter, r *http.Request) {
 			TLSEnabled      bool   `json:"tlsEnabled"`
 			TLSCertFile    string `json:"tlsCertFile"`
 			TLSKeyFile     string `json:"tlsKeyFile"`
+			ForceHTTPS      bool   `json:"forceHttps"`
+			HTTPListenPort  int    `json:"httpListenPort"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -4724,7 +4931,7 @@ func handleProxyInstances(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		instance, err := createProxyInstance(req.Name, req.ListenPort, req.Backend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, req.FallbackBackend)
+		instance, err := createProxyInstance(req.Name, req.ListenPort, req.Backend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, req.FallbackBackend, req.ForceHTTPS, req.HTTPListenPort)
 		if err != nil {
 			log.Printf("创建防护应用失败: %v", err)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -4778,6 +4985,8 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 			TLSEnabled      bool   `json:"tlsEnabled"`
 			TLSCertFile     string `json:"tlsCertFile"`
 			TLSKeyFile      string `json:"tlsKeyFile"`
+			ForceHTTPS      bool   `json:"forceHttps"`
+			HTTPListenPort  int    `json:"httpListenPort"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -4801,6 +5010,36 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// 验证监听端口
+		if req.ListenPort < 1 || req.ListenPort > 65535 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "监听端口必须在1-65535之间",
+			})
+			return
+		}
+
+		// 验证HTTP端口（如果启用了强制HTTPS）
+		if req.ForceHTTPS {
+			if req.HTTPListenPort < 1 || req.HTTPListenPort > 65535 {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"error":   "HTTP监听端口必须在1-65535之间",
+				})
+				return
+			}
+			if req.HTTPListenPort == req.ListenPort {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"error":   "HTTP监听端口不能和主监听端口相同",
+				})
+				return
+			}
+		}
+
 		if req.ListenPort == adminPort {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -4810,13 +5049,25 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		if req.ForceHTTPS && req.HTTPListenPort == adminPort {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "HTTP端口 " + fmt.Sprintf("%d", req.HTTPListenPort) + " 与管理服务端口冲突",
+			})
+			return
+		}
+
 		oldPort := instance.ListenPort
 		oldWAFID := instance.WAFID
 		oldBackend := instance.Backend
+		oldFallbackBackend := instance.FallbackBackend
 		oldName := instance.Name
 		oldTLSEnabled := instance.TLSEnabled
 		oldTLSCertFile := instance.TLSCertFile
 		oldTLSKeyFile := instance.TLSKeyFile
+		oldForceHTTPS := instance.ForceHTTPS
+		oldHTTPListenPort := instance.HTTPListenPort
 
 		targetURL, err := url.Parse(req.Backend)
 		if err != nil {
@@ -4850,11 +5101,11 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 		
 		log.Printf("[更新代理] WAF绑定变化检测: oldWAFID=%s, req.WAFID=%s, 使用handler=%T", oldWAFID, req.WAFID, handler)
 
-		if oldPort == req.ListenPort && oldWAFID == req.WAFID && req.Backend == oldBackend && req.Name == oldName && oldTLSEnabled == req.TLSEnabled && oldTLSCertFile == req.TLSCertFile && oldTLSKeyFile == req.TLSKeyFile {
+		if oldPort == req.ListenPort && oldWAFID == req.WAFID && req.Backend == oldBackend && req.Name == oldName && oldTLSEnabled == req.TLSEnabled && oldTLSCertFile == req.TLSCertFile && oldTLSKeyFile == req.TLSKeyFile && oldForceHTTPS == req.ForceHTTPS && oldHTTPListenPort == req.HTTPListenPort {
 			log.Printf("更新代理服务器 %s: 无需重启", instance.Name)
 
-			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, fallback_backend = ?, waf_id = ?, tls_enabled = ?, tls_cert_file = ?, tls_key_file = ? WHERE id = ?",
-				req.Name, req.ListenPort, req.Backend, req.FallbackBackend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, id)
+			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, fallback_backend = ?, waf_id = ?, tls_enabled = ?, tls_cert_file = ?, tls_key_file = ?, force_https = ?, http_listen_port = ? WHERE id = ?",
+				req.Name, req.ListenPort, req.Backend, req.FallbackBackend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, req.ForceHTTPS, req.HTTPListenPort, id)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{
@@ -4871,6 +5122,8 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 			instance.TLSEnabled = req.TLSEnabled
 			instance.TLSCertFile = req.TLSCertFile
 			instance.TLSKeyFile = req.TLSKeyFile
+			instance.ForceHTTPS = req.ForceHTTPS
+			instance.HTTPListenPort = req.HTTPListenPort
 			instance.Proxy = proxy
 			
 			if req.WAFID != "" {
@@ -4884,7 +5137,7 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 			} else {
 				instance.WAFName = ""
 			}
-		} else if oldPort == req.ListenPort {
+		} else if oldPort == req.ListenPort && oldForceHTTPS == req.ForceHTTPS && oldHTTPListenPort == req.HTTPListenPort {
 			if instance.Server != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
@@ -4892,8 +5145,8 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 				time.Sleep(600 * time.Millisecond)
 			}
 
-			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, fallback_backend = ?, waf_id = ?, tls_enabled = ?, tls_cert_file = ?, tls_key_file = ? WHERE id = ?",
-				req.Name, req.ListenPort, req.Backend, req.FallbackBackend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, id)
+			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, fallback_backend = ?, waf_id = ?, tls_enabled = ?, tls_cert_file = ?, tls_key_file = ?, force_https = ?, http_listen_port = ? WHERE id = ?",
+				req.Name, req.ListenPort, req.Backend, req.FallbackBackend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, req.ForceHTTPS, req.HTTPListenPort, id)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{
@@ -4910,6 +5163,8 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 			instance.TLSEnabled = req.TLSEnabled
 			instance.TLSCertFile = req.TLSCertFile
 			instance.TLSKeyFile = req.TLSKeyFile
+			instance.ForceHTTPS = req.ForceHTTPS
+			instance.HTTPListenPort = req.HTTPListenPort
 			instance.Proxy = proxy
 			
 			if req.WAFID != "" {
@@ -4973,12 +5228,71 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 				}
 			}()
 
+			// 处理 HTTP 重定向服务器
+			if oldForceHTTPS != req.ForceHTTPS || oldHTTPListenPort != req.HTTPListenPort {
+				// 停止旧的 HTTP 服务器
+				if instance.HTTPServer != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					instance.HTTPServer.Shutdown(ctx)
+					time.Sleep(600 * time.Millisecond)
+				}
+
+				// 如果启用了强制 HTTPS，启动新的 HTTP 重定向服务器
+				if req.ForceHTTPS && req.HTTPListenPort > 0 && req.TLSEnabled {
+					// 先测试HTTP端口是否可用
+					testHTTPListener, err := net.Listen("tcp", fmt.Sprintf(":%d", req.HTTPListenPort))
+					if err != nil {
+						// 测试失败，返回错误
+						w.WriteHeader(http.StatusInternalServerError)
+						json.NewEncoder(w).Encode(map[string]interface{}{
+							"success": false,
+							"error":   "HTTP端口 " + fmt.Sprintf("%d", req.HTTPListenPort) + " 已被占用",
+						})
+						return
+					}
+					testHTTPListener.Close()
+
+					httpsPort := req.ListenPort
+					redirectHandler := func(w http.ResponseWriter, r *http.Request) {
+						host := r.Host
+						if idx := strings.Index(host, ":"); idx != -1 {
+							host = host[:idx]
+						}
+						targetURL := fmt.Sprintf("https://%s:%d%s", host, httpsPort, r.URL.RequestURI())
+						http.Redirect(w, r, targetURL, http.StatusTemporaryRedirect)
+					}
+
+					instance.HTTPServer = &http.Server{
+						Addr:    fmt.Sprintf(":%d", req.HTTPListenPort),
+						Handler: http.HandlerFunc(redirectHandler),
+					}
+
+					go func() {
+						time.Sleep(500 * time.Millisecond)
+						log.Printf("HTTP重定向服务器 %s 已启动在端口 %d -> HTTPS %d", instance.Name, req.HTTPListenPort, req.ListenPort)
+						if err := instance.HTTPServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+							log.Printf("HTTP重定向服务器 %s 运行错误: %v", instance.Name, err)
+						} else if err == http.ErrServerClosed {
+							log.Printf("HTTP重定向服务器 %s 已关闭", instance.Name)
+						}
+					}()
+				}
+			}
+
 			log.Printf("更新代理服务器 %s: 端口 %d (未变化), TLS: %v", instance.Name, oldPort, req.TLSEnabled)
 		} else {
 			if instance.Server != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				instance.Server.Shutdown(ctx)
+				time.Sleep(600 * time.Millisecond)
+			}
+
+			if instance.HTTPServer != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				instance.HTTPServer.Shutdown(ctx)
 				time.Sleep(600 * time.Millisecond)
 			}
 
@@ -5018,8 +5332,8 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, fallback_backend = ?, waf_id = ?, tls_enabled = ?, tls_cert_file = ?, tls_key_file = ? WHERE id = ?",
-				req.Name, req.ListenPort, req.Backend, req.FallbackBackend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, id)
+			_, err = db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, fallback_backend = ?, waf_id = ?, tls_enabled = ?, tls_cert_file = ?, tls_key_file = ?, force_https = ?, http_listen_port = ? WHERE id = ?",
+				req.Name, req.ListenPort, req.Backend, req.FallbackBackend, req.WAFID, req.TLSEnabled, req.TLSCertFile, req.TLSKeyFile, req.ForceHTTPS, req.HTTPListenPort, id)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{
@@ -5037,6 +5351,8 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 			instance.TLSEnabled = req.TLSEnabled
 			instance.TLSCertFile = req.TLSCertFile
 			instance.TLSKeyFile = req.TLSKeyFile
+			instance.ForceHTTPS = req.ForceHTTPS
+			instance.HTTPListenPort = req.HTTPListenPort
 			instance.Proxy = proxy
 			
 			if req.WAFID != "" {
@@ -5064,6 +5380,66 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 				}
 			}()
 
+			// 如果启用了强制 HTTPS，启动 HTTP 重定向服务器
+			if req.ForceHTTPS && req.HTTPListenPort > 0 && req.TLSEnabled {
+				// 先测试HTTP端口是否可用
+				testHTTPListener, err := net.Listen("tcp", fmt.Sprintf(":%d", req.HTTPListenPort))
+				if err != nil {
+					// 测试失败，先关闭已经启动的主服务器
+					if instance.Server != nil {
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer cancel()
+						instance.Server.Shutdown(ctx)
+					}
+					// 然后回滚数据库
+					db.Exec("UPDATE proxy_instances SET name = ?, listen_port = ?, backend = ?, fallback_backend = ?, waf_id = ?, tls_enabled = ?, tls_cert_file = ?, tls_key_file = ?, force_https = ?, http_listen_port = ? WHERE id = ?",
+						oldName, oldPort, oldBackend, oldFallbackBackend, oldWAFID, oldTLSEnabled, oldTLSCertFile, oldTLSKeyFile, oldForceHTTPS, oldHTTPListenPort, id)
+					instance.Name = oldName
+					instance.ListenPort = oldPort
+					instance.Backend = oldBackend
+					instance.FallbackBackend = oldFallbackBackend
+					instance.WAFID = oldWAFID
+					instance.TLSEnabled = oldTLSEnabled
+					instance.TLSCertFile = oldTLSCertFile
+					instance.TLSKeyFile = oldTLSKeyFile
+					instance.ForceHTTPS = oldForceHTTPS
+					instance.HTTPListenPort = oldHTTPListenPort
+
+					w.WriteHeader(http.StatusInternalServerError)
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"success": false,
+						"error":   "HTTP端口 " + fmt.Sprintf("%d", req.HTTPListenPort) + " 已被占用",
+					})
+					return
+				}
+				testHTTPListener.Close()
+
+				httpsPort := req.ListenPort
+				redirectHandler := func(w http.ResponseWriter, r *http.Request) {
+					host := r.Host
+					if idx := strings.Index(host, ":"); idx != -1 {
+						host = host[:idx]
+					}
+					targetURL := fmt.Sprintf("https://%s:%d%s", host, httpsPort, r.URL.RequestURI())
+					http.Redirect(w, r, targetURL, http.StatusTemporaryRedirect)
+				}
+
+				instance.HTTPServer = &http.Server{
+					Addr:    fmt.Sprintf(":%d", req.HTTPListenPort),
+					Handler: http.HandlerFunc(redirectHandler),
+				}
+
+				go func() {
+					time.Sleep(500 * time.Millisecond)
+					log.Printf("HTTP重定向服务器 %s 已启动在端口 %d -> HTTPS %d", instance.Name, req.HTTPListenPort, req.ListenPort)
+					if err := instance.HTTPServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+						log.Printf("HTTP重定向服务器 %s 运行错误: %v", instance.Name, err)
+					} else if err == http.ErrServerClosed {
+						log.Printf("HTTP重定向服务器 %s 已关闭", instance.Name)
+					}
+				}()
+			}
+
 			log.Printf("更新代理服务器 %s: 端口 %d -> %d, WAF: %s -> %s", instance.Name, oldPort, instance.ListenPort, oldWAFID, instance.WAFID)
 		}
 
@@ -5079,12 +5455,21 @@ func handleProxyInstance(w http.ResponseWriter, r *http.Request) {
 		instance, exists := proxyInstances[id]
 		proxyMutex.RUnlock()
 
-		if exists && instance.Server != nil {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				instance.Server.Shutdown(ctx)
-			}()
+		if exists {
+			if instance.Server != nil {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					instance.Server.Shutdown(ctx)
+				}()
+			}
+			if instance.HTTPServer != nil {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					instance.HTTPServer.Shutdown(ctx)
+				}()
+			}
 		}
 
 		_, err := db.Exec("DELETE FROM proxy_instances WHERE id = ?", id)
@@ -5448,6 +5833,26 @@ func handlePortForwardInstance(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
 				"error":   "端口转发实例不存在",
+			})
+			return
+		}
+
+		// 验证监听端口
+		if req.ListenPort < 1 || req.ListenPort > 65535 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "监听端口必须在1-65535之间",
+			})
+			return
+		}
+
+		// 验证目标端口
+		if req.TargetPort < 1 || req.TargetPort > 65535 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "目标端口必须在1-65535之间",
 			})
 			return
 		}

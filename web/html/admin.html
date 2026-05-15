@@ -2076,6 +2076,37 @@
             opacity: 0.4;
             cursor: not-allowed;
         }
+
+        .domain-display {
+            position: relative;
+            cursor: pointer;
+            display: inline-block;
+        }
+
+        .domain-rule-tooltip {
+            display: none;
+            position: fixed;
+            background: #fff;
+            border: 1px solid var(--border-light);
+            border-radius: 6px;
+            padding: 8px 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            z-index: 9999;
+            font-size: 12px;
+            min-width: 200px;
+            text-align: left;
+        }
+
+        .domain-rule-tooltip .tooltip-link {
+            display: block;
+            color: var(--primary-blue);
+            text-decoration: none;
+            padding: 4px 0;
+        }
+
+        .domain-rule-tooltip .tooltip-link:hover {
+            text-decoration: underline;
+        }
     </style>
 </head>
 <body>
@@ -3148,6 +3179,18 @@
                         <select id="proxyEditCertId" onchange="selectProxyCert()">
                             <option value="">选择证书...</option>
                         </select>
+                    </div>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="proxyEditForceHTTPS" onchange="toggleForceHTTPSFields()">
+                            强制使用 HTTPS (访问 HTTP 时自动重定向)
+                        </label>
+                    </div>
+                    <div id="proxyForceHTTPSFields" style="display: none;">
+                        <div class="form-group">
+                            <label>HTTP 监听端口</label>
+                            <input type="number" id="proxyEditHTTPListenPort" placeholder="例如: 80">
+                        </div>
                     </div>
                 </div>
             </div>

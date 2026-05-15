@@ -9,6 +9,49 @@ let currentEditProxyId = null;
 let currentEditPortForwardId = null;
 let currentEditCertId = null;
 let confirmCallback = null;
+let activeTooltip = null;
+
+function showDomainTooltip(event, tooltipId) {
+    const tooltip = document.getElementById(tooltipId);
+    if (!tooltip) return;
+    
+    const triggerRect = event.target.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    
+    let left = triggerRect.left;
+    let top = triggerRect.bottom + 8;
+    
+    // 确保 tooltip 不会超出右边
+    if (left + tooltipRect.width > window.innerWidth) {
+        left = window.innerWidth - tooltipRect.width - 20;
+    }
+    
+    // 确保 tooltip 不会超出左边
+    if (left < 20) {
+        left = 20;
+    }
+    
+    // 确保 tooltip 不会超出下边
+    if (top + tooltipRect.height > window.innerHeight) {
+        top = triggerRect.top - tooltipRect.height - 8;
+    }
+    
+    tooltip.style.left = left + 'px';
+    tooltip.style.top = top + 'px';
+    tooltip.style.display = 'block';
+    activeTooltip = tooltip;
+}
+
+function hideDomainTooltip(tooltipId) {
+    const tooltip = document.getElementById(tooltipId);
+    if (tooltip) {
+        tooltip.style.display = 'none';
+    }
+    if (activeTooltip === tooltip) {
+        activeTooltip = null;
+    }
+}
+
 let statsData = {
     requestCount: 0,
     pv: 0,
@@ -774,11 +817,26 @@ function renderProxyInstances() {
         let rulesHtml = '';
         if (instanceRules.length > 0) {
             rulesHtml = instanceRules.map(rule => {
-                let actionDisplay = rule.domain === '' || rule.isDefault ? '默认规则' : rule.domain.split('\n').join(', ');
+                let actionDisplay;
+                if (rule.domain === '' || rule.isDefault) {
+                    actionDisplay = '默认规则';
+                } else {
+                    const port = instance.listenPort;
+                    const protocol = instance.tlsEnabled ? 'https' : 'http';
+                    const domains = rule.domain.split('\n').filter(d => d.trim());
+                    const firstDomain = domains[0];
+                    const extraCount = domains.length > 1 ? `<span style="color: var(--primary-blue);"> (+${domains.length - 1})</span>` : '';
+                    const tooltipLinks = domains.map(d => `<a href="${protocol}://${d}:${port}" target="_blank" rel="noopener noreferrer" class="tooltip-link">${protocol}://${d}:${port}</a>`).join('');
+                    const tooltipId = `tooltip-${Math.random().toString(36).substr(2, 9)}`;
+                    actionDisplay = `<div class="domain-display" id="${tooltipId}-trigger" onmouseover="showDomainTooltip(event, '${tooltipId}')" onmouseout="hideDomainTooltip('${tooltipId}')">
+                        <span style="display: inline-block; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; color: var(--primary-blue); cursor: pointer;">${firstDomain}</span>${extraCount}
+                        <div class="domain-rule-tooltip" id="${tooltipId}">${tooltipLinks}</div>
+                    </div>`;
+                }
                 let targetDisplay = rule.ruleType === 'redirect' ? rule.redirectUrl : (rule.ruleType === 'close' ? '-' : (rule.backend || '-'));
                 return `
                 <tr style="transition: background 0.2s;">
-                    <td style="padding: 8px 12px; border-bottom: 1px solid #e0e0e0; font-size: 13px;">${actionDisplay}</td>
+                    <td style="padding: 8px 12px; border-bottom: 1px solid #e0e0e0; font-size: 13px; position: relative;">${actionDisplay}</td>
                     <td style="padding: 8px 12px; border-bottom: 1px solid #e0e0e0; font-size: 13px;">${getRuleTypeDisplay(rule)}</td>
                     <td style="padding: 8px 12px; border-bottom: 1px solid #e0e0e0; font-size: 13px;">${targetDisplay}</td>
                     <td style="padding: 8px 12px; border-bottom: 1px solid #e0e0e0; text-align: right; white-space: nowrap;">
@@ -795,7 +853,7 @@ function renderProxyInstances() {
         div.className = 'proxy-instance-card';
 
         div.innerHTML = `
-            <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: #f5f7fa; border-bottom: 1px solid #e0e0e0;">
+            <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: #f5f7fa; border-bottom: 1px solid #e0e0e0; border-radius: 8px 8px 0 0;">
                 <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
                     <span style="font-weight: 600; font-size: 14px;">🌐 ${instance.name}</span>
                     <span class="instance-badge">端口: ${instance.listenPort}</span>
@@ -803,24 +861,26 @@ function renderProxyInstances() {
                     <span style="font-size: 13px; color: #666;">WAF: ${wafDisplay}</span>
                 </div>
                 <div style="display: flex; gap: 8px;">
-                    <button class="btn btn-primary" style="padding: 5px 12px; font-size: 12px;" onclick="openAddDomainRuleModal('${instance.id}')">+ 添加规则</button>
+                    <button class="btn btn-primary" style="padding: 5px 12px; font-size: 12px; white-space: nowrap;" onclick="openAddDomainRuleModal('${instance.id}')">+ 添加子规则</button>
                     <button class="btn-icon" onclick="editProxyInstance('${instance.id}')" title="编辑">✏️</button>
                     <button class="btn-icon delete" onclick="deleteProxyInstance('${instance.id}')" title="删除">🗑️</button>
                 </div>
             </div>
-            <table style="width: 100%; border-collapse: collapse;">
-                <thead>
-                    <tr style="background: #fafafa;">
-                        <th style="padding: 10px 14px; text-align: left; font-size: 12px; font-weight: 600; color: #666; border-bottom: 1px solid #e0e0e0;">规则名称</th>
-                        <th style="padding: 10px 14px; text-align: left; font-size: 12px; font-weight: 600; color: #666; border-bottom: 1px solid #e0e0e0; width: 100px;">类型</th>
-                        <th style="padding: 10px 14px; text-align: left; font-size: 12px; font-weight: 600; color: #666; border-bottom: 1px solid #e0e0e0;">目标</th>
-                        <th style="padding: 10px 14px; text-align: right; font-size: 12px; font-weight: 600; color: #666; border-bottom: 1px solid #e0e0e0; width: 90px;">操作</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${rulesHtml}
-                </tbody>
-            </table>
+            <div style="overflow-x: auto;">
+                <table style="width: 100%; border-collapse: collapse; min-width: 600px;">
+                    <thead>
+                        <tr style="background: #fafafa;">
+                            <th style="padding: 10px 14px; text-align: left; font-size: 12px; font-weight: 600; color: #666; border-bottom: 1px solid #e0e0e0;">规则名称</th>
+                            <th style="padding: 10px 14px; text-align: left; font-size: 12px; font-weight: 600; color: #666; border-bottom: 1px solid #e0e0e0; width: 100px;">类型</th>
+                            <th style="padding: 10px 14px; text-align: left; font-size: 12px; font-weight: 600; color: #666; border-bottom: 1px solid #e0e0e0;">目标</th>
+                            <th style="padding: 10px 14px; text-align: right; font-size: 12px; font-weight: 600; color: #666; border-bottom: 1px solid #e0e0e0; width: 90px;">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rulesHtml}
+                    </tbody>
+                </table>
+            </div>
         `;
         container.appendChild(div);
     });
@@ -967,6 +1027,8 @@ async function openCreateProxyModal() {
     document.getElementById('proxyEditTLSCertFile').value = '';
     document.getElementById('proxyEditTLSKeyFile').value = '';
     document.getElementById('proxyEditCertId').value = '';
+    document.getElementById('proxyEditForceHTTPS').checked = false;
+    document.getElementById('proxyEditHTTPListenPort').value = '';
     toggleProxyTLSFields();
 
     document.getElementById('proxyBackendGroup').style.display = 'none';
@@ -1002,7 +1064,11 @@ async function editProxyInstance(id) {
     document.getElementById('proxyEditTLSEnabled').checked = instance.tlsEnabled || false;
     document.getElementById('proxyEditTLSCertFile').value = instance.tlsCertFile || '';
     document.getElementById('proxyEditTLSKeyFile').value = instance.tlsKeyFile || '';
+    // 先切换TLS相关显示，再设置强制HTTPS的字段
     toggleProxyTLSFields();
+    document.getElementById('proxyEditForceHTTPS').checked = instance.forceHttps || false;
+    document.getElementById('proxyEditHTTPListenPort').value = instance.httpListenPort || '';
+    toggleForceHTTPSFields();
 
     document.getElementById('proxyBackendGroup').style.display = 'none';
     document.getElementById('proxyFallbackBackendGroup').style.display = 'none';
@@ -1024,6 +1090,17 @@ async function editProxyInstance(id) {
 function toggleProxyTLSFields() {
     const enabled = document.getElementById('proxyEditTLSEnabled').checked;
     document.getElementById('proxyTLSFields').style.display = enabled ? 'block' : 'none';
+
+    // 如果禁用HTTPS，同时隐藏强制HTTPS字段，并取消勾选状态
+    if (!enabled) {
+        document.getElementById('proxyEditForceHTTPS').checked = false;
+        document.getElementById('proxyForceHTTPSFields').style.display = 'none';
+    }
+}
+
+function toggleForceHTTPSFields() {
+    const enabled = document.getElementById('proxyEditForceHTTPS').checked;
+    document.getElementById('proxyForceHTTPSFields').style.display = enabled ? 'block' : 'none';
 }
 
 function selectProxyCert() {
@@ -1223,14 +1300,39 @@ async function saveProxyEdit() {
     const tlsEnabled = document.getElementById('proxyEditTLSEnabled').checked;
     const tlsCertFile = document.getElementById('proxyEditTLSCertFile').value;
     const tlsKeyFile = document.getElementById('proxyEditTLSKeyFile').value;
+    const forceHTTPS = document.getElementById('proxyEditForceHTTPS').checked;
+    const httpListenPort = parseInt(document.getElementById('proxyEditHTTPListenPort').value) || 0;
 
     if (!name || !listenPort) {
         showAlert('提示', '请填写名称和端口');
         return;
     }
 
+    // 验证监听端口
+    if (isNaN(listenPort) || listenPort < 1 || listenPort > 65535) {
+        showAlert('错误', '监听端口必须在1-65535之间');
+        return;
+    }
+
+    // 验证HTTP监听端口（如果启用了强制HTTPS）
+    if (forceHTTPS) {
+        if (isNaN(httpListenPort) || httpListenPort < 1 || httpListenPort > 65535) {
+            showAlert('错误', 'HTTP监听端口必须在1-65535之间');
+            return;
+        }
+        if (httpListenPort === listenPort) {
+            showAlert('错误', 'HTTP监听端口不能和主监听端口相同');
+            return;
+        }
+    }
+
     if (tlsEnabled && (!tlsCertFile || !tlsKeyFile)) {
         showAlert('提示', '启用HTTPS需要提供证书和私钥文件路径');
+        return;
+    }
+
+    if (forceHTTPS && !httpListenPort) {
+        showAlert('提示', '启用强制HTTPS需要填写HTTP监听端口');
         return;
     }
 
@@ -1250,7 +1352,9 @@ async function saveProxyEdit() {
                     wafId: wafId,
                     tlsEnabled: tlsEnabled,
                     tlsCertFile: tlsCertFile,
-                    tlsKeyFile: tlsKeyFile
+                    tlsKeyFile: tlsKeyFile,
+                    forceHTTPS: forceHTTPS,
+                    httpListenPort: httpListenPort
                 })
             });
         } else {
@@ -1267,7 +1371,9 @@ async function saveProxyEdit() {
                     wafId: wafId,
                     tlsEnabled: tlsEnabled,
                     tlsCertFile: tlsCertFile,
-                    tlsKeyFile: tlsKeyFile
+                    tlsKeyFile: tlsKeyFile,
+                    forceHTTPS: forceHTTPS,
+                    httpListenPort: httpListenPort
                 })
             });
         }
@@ -1374,7 +1480,7 @@ function renderCertificates() {
                     <div class="instance-grid-label">域名</div>
                     <div class="instance-grid-value" style="position: relative; cursor: pointer;" onmouseover="this.querySelector('.domain-tooltip').style.display='block'" onmouseout="this.querySelector('.domain-tooltip').style.display='none'">
                         <span style="display: inline-block; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;">${cert.domains.split(',')[0]}</span>${cert.domains.includes(',') ? '<span style="color: var(--primary-blue);"> (+' + (cert.domains.split(',').length - 1) + ')</span>' : ''}
-                        <div class="domain-tooltip" style="display: none; position: absolute; top: 100%; left: 0; background: #fff; border: 1px solid var(--border-light); border-radius: 6px; padding: 8px 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 100; white-space: pre-line; font-size: 13px; min-width: 150px;">${cert.domains}</div>
+                        <div class="domain-tooltip" style="display: none; position: absolute; top: 100%; left: 0; background: #fff; border: 1px solid var(--border-light); border-radius: 6px; padding: 8px 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 100; white-space: pre-line; font-size: 13px; min-width: 150px;">${cert.domains.split(',').join('\n')}</div>
                     </div>
                 </div>
                 <div class="instance-grid-item">
@@ -1917,6 +2023,18 @@ async function savePortForwardEdit() {
     
     if (!name || !listenPort || !targetAddress || !targetPort) {
         showAlert('提示', '请填写完整信息');
+        return;
+    }
+
+    // 验证监听端口
+    if (isNaN(listenPort) || listenPort < 1 || listenPort > 65535) {
+        showAlert('错误', '监听端口必须在1-65535之间');
+        return;
+    }
+
+    // 验证目标端口
+    if (isNaN(targetPort) || targetPort < 1 || targetPort > 65535) {
+        showAlert('错误', '目标端口必须在1-65535之间');
         return;
     }
     
