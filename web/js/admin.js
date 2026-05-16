@@ -85,6 +85,40 @@ let tooltipElement = null;
 let geoMapChartChina = null;
 let geoMapChartWorld = null;
 let qpsChart = null;
+
+let cachedChinaMapData = null;
+let cachedWorldMapData = null;
+let mapCachePromises = {};
+
+function loadMapData(mapType) {
+    if (mapCachePromises[mapType]) {
+        return mapCachePromises[mapType];
+    }
+
+    const mapFile = mapType === 'china' ? '/static/maps/china.json' : '/static/maps/world.json';
+    mapCachePromises[mapType] = fetch(mapFile)
+        .then(response => response.json())
+        .then(data => {
+            if (mapType === 'china') {
+                cachedChinaMapData = data;
+            } else {
+                cachedWorldMapData = data;
+            }
+            return data;
+        })
+        .catch(error => {
+            console.error(`加载${mapType === 'china' ? '中国' : '世界'}地图数据失败:`, error);
+            delete mapCachePromises[mapType];
+            return null;
+        });
+
+    return mapCachePromises[mapType];
+}
+
+function getCachedMapData(mapType) {
+    return mapType === 'china' ? cachedChinaMapData : cachedWorldMapData;
+}
+
 let currentUsername = '';
 let isLoggedIn = false;
 let currentLogsPage = 1;
@@ -92,6 +126,187 @@ let totalLogsPages = 1;
 let currentLogsPageSize = 20;
 let fullClientStats = null;
 let top5ClientStats = null;
+
+let wsConnection = null;
+let wsReconnectTimer = null;
+let wsEnabled = true;
+
+function initWebSocket() {
+    if (!wsEnabled) return;
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+    try {
+        wsConnection = new WebSocket(wsUrl);
+
+        wsConnection.onopen = () => {
+            console.log('WebSocket连接已建立');
+            if (wsReconnectTimer) {
+                clearTimeout(wsReconnectTimer);
+                wsReconnectTimer = null;
+            }
+        };
+
+        wsConnection.onmessage = (event) => {
+            try {
+                const message = JSON.parse(event.data);
+                handleWebSocketMessage(message);
+            } catch (e) {
+                console.error('WebSocket消息解析失败:', e);
+            }
+        };
+
+        wsConnection.onerror = (error) => {
+            console.error('WebSocket错误:', error);
+        };
+
+        wsConnection.onclose = () => {
+            console.log('WebSocket连接已关闭');
+            wsConnection = null;
+            if (wsEnabled) {
+                wsReconnectTimer = setTimeout(() => {
+                    console.log('正在重新连接WebSocket...');
+                    initWebSocket();
+                }, 3000);
+            }
+        };
+    } catch (e) {
+        console.error('WebSocket连接失败:', e);
+        if (wsEnabled) {
+            wsReconnectTimer = setTimeout(() => {
+                initWebSocket();
+            }, 3000);
+        }
+    }
+}
+
+function handleWebSocketMessage(message) {
+    const { type, data } = message;
+
+    switch (type) {
+        case 'statistics':
+            updateStatsUI(data);
+            break;
+        case 'attack_log':
+            handleNewAttackLog(data);
+            break;
+        default:
+            console.log('未知WebSocket消息类型:', type);
+    }
+}
+
+function updateStatsUI(data) {
+    if (!data) return;
+
+    if (data.statistics) {
+        statsData = data.statistics;
+    }
+    if (data.trafficStats) {
+        if (!historyData.trafficStats) {
+            historyData.trafficStats = {};
+        }
+        historyData.trafficStats = data.trafficStats;
+    }
+    if (data.qpsHistory) {
+        historyData.qpsHistory = data.qpsHistory;
+    }
+    if (data.attackHistory) {
+        historyData.attackHistory = data.attackHistory;
+    }
+    if (data.trafficHistory) {
+        historyData.trafficHistory = data.trafficHistory;
+    }
+
+    document.getElementById('statRequestCount').textContent = formatNumber(statsData.requestCount);
+    document.getElementById('statPV').textContent = formatNumber(statsData.pv);
+    document.getElementById('statUV').textContent = formatNumber(statsData.uv);
+    document.getElementById('statUniqueIP').textContent = formatNumber(statsData.uniqueIP);
+
+    document.getElementById('statRequestCount-mobile')?.setAttribute('data-value', statsData.requestCount);
+    document.getElementById('statPV-mobile')?.setAttribute('data-value', statsData.pv);
+    document.getElementById('statUV-mobile')?.setAttribute('data-value', statsData.uv);
+    document.getElementById('statUniqueIP-mobile')?.setAttribute('data-value', statsData.uniqueIP);
+    if (document.getElementById('statRequestCount-mobile')) document.getElementById('statRequestCount-mobile').textContent = formatNumber(statsData.requestCount);
+    if (document.getElementById('statPV-mobile')) document.getElementById('statPV-mobile').textContent = formatNumber(statsData.pv);
+    if (document.getElementById('statUV-mobile')) document.getElementById('statUV-mobile').textContent = formatNumber(statsData.uv);
+    if (document.getElementById('statUniqueIP-mobile')) document.getElementById('statUniqueIP-mobile').textContent = formatNumber(statsData.uv);
+
+    document.getElementById('statBlockedCount').textContent = formatNumber(statsData.blockedCount);
+    document.getElementById('statAttackIP').textContent = formatNumber(statsData.attackIP);
+    document.getElementById('stat4xxBlocked').textContent = formatNumber(statsData.blockedCount);
+    document.getElementById('stat4xxBlockRate').textContent = statsData.fourXxBlockRate ? statsData.fourXxBlockRate.toFixed(2) + '%' : '0%';
+
+    if (document.getElementById('statBlockedCount-mobile')) document.getElementById('statBlockedCount-mobile').textContent = formatNumber(statsData.blockedCount);
+    if (document.getElementById('statAttackIP-mobile')) document.getElementById('statAttackIP-mobile').textContent = formatNumber(statsData.attackIP);
+    if (document.getElementById('stat4xxBlocked-mobile')) document.getElementById('stat4xxBlocked-mobile').textContent = formatNumber(statsData.blockedCount);
+    if (document.getElementById('stat4xxBlockRate-mobile')) document.getElementById('stat4xxBlockRate-mobile').textContent = statsData.fourXxBlockRate ? statsData.fourXxBlockRate.toFixed(2) + '%' : '0%';
+
+    document.getElementById('stat4xxError').textContent = formatNumber(statsData.fourXxError);
+    document.getElementById('stat4xxErrorRate').textContent = statsData.fourXxErrorRate ? statsData.fourXxErrorRate.toFixed(2) + '%' : '0%';
+    document.getElementById('stat5xxError').textContent = formatNumber(statsData.fiveXxError);
+    document.getElementById('stat5xxErrorRate').textContent = statsData.fiveXxErrorRate ? statsData.fiveXxErrorRate.toFixed(2) + '%' : '0%';
+
+    if (document.getElementById('stat4xxError-mobile')) document.getElementById('stat4xxError-mobile').textContent = formatNumber(statsData.fourXxError);
+    if (document.getElementById('stat4xxErrorRate-mobile')) document.getElementById('stat4xxErrorRate-mobile').textContent = statsData.fourXxErrorRate ? statsData.fourXxErrorRate.toFixed(2) + '%' : '0%';
+    if (document.getElementById('stat5xxError-mobile')) document.getElementById('stat5xxError-mobile').textContent = formatNumber(statsData.fiveXxError);
+    if (document.getElementById('stat5xxErrorRate-mobile')) document.getElementById('stat5xxErrorRate-mobile').textContent = statsData.fiveXxErrorRate ? statsData.fiveXxErrorRate.toFixed(2) + '%' : '0%';
+
+    document.getElementById('statAvgResponseTime').textContent = statsData.avgResponseTime > 0 ? statsData.avgResponseTime + 'ms' : '-';
+    if (document.getElementById('statAvgResponseTime-mobile')) document.getElementById('statAvgResponseTime-mobile').textContent = statsData.avgResponseTime > 0 ? statsData.avgResponseTime + 'ms' : '-';
+
+    const qpsBadgeValue = document.getElementById('qps-badge-value');
+    if (qpsBadgeValue) {
+        qpsBadgeValue.textContent = statsData.qps;
+    }
+    const qpsBadgeValueMobile = document.getElementById('qps-badge-value-mobile');
+    if (qpsBadgeValueMobile) {
+        qpsBadgeValueMobile.textContent = statsData.qps;
+    }
+
+    const attackBadgeValue = document.getElementById('attack-badge-value');
+    if (attackBadgeValue) {
+        const attackHistory = historyData.attackHistory || [];
+        const currentAttack = attackHistory.length > 0 ? attackHistory[attackHistory.length - 1].count : 0;
+        attackBadgeValue.textContent = currentAttack;
+    }
+    const attackBadgeValueMobile = document.getElementById('attack-badge-value-mobile');
+    if (attackBadgeValueMobile) {
+        const attackHistory = historyData.attackHistory || [];
+        const currentAttack = attackHistory.length > 0 ? attackHistory[attackHistory.length - 1].count : 0;
+        attackBadgeValueMobile.textContent = currentAttack;
+    }
+
+    document.getElementById('statPVPeak').textContent = formatNumber(statsData.pvPeak);
+    document.getElementById('statBlockPeak').textContent = formatNumber(statsData.blockPeak);
+    document.getElementById('statWAFCount').textContent = wafInstances.length;
+    if (document.getElementById('statPVPeak-mobile')) document.getElementById('statPVPeak-mobile').textContent = formatNumber(statsData.pvPeak);
+    if (document.getElementById('statBlockPeak-mobile')) document.getElementById('statBlockPeak-mobile').textContent = formatNumber(statsData.blockPeak);
+    if (document.getElementById('statWAFCount-mobile')) document.getElementById('statWAFCount-mobile').textContent = wafInstances.length;
+
+    renderGeoDistribution();
+    renderGeoDistributionMobile();
+    renderGeoMapMobile();
+}
+
+function handleNewAttackLog(log) {
+    const activeTab = document.querySelector('.tab-content.active');
+    if (activeTab && activeTab.id === 'logs-tab') {
+        loadLogs();
+    }
+
+    const recentAttacksContainer = document.getElementById('recentAttacks');
+    if (recentAttacksContainer && log) {
+        const attackTypeElem = recentAttacksContainer.querySelector(`[data-attack-type="${log.attackType}"]`);
+        if (attackTypeElem) {
+            const countElem = attackTypeElem.querySelector('.attack-count');
+            if (countElem) {
+                const currentCount = parseInt(countElem.textContent) || 0;
+                countElem.textContent = currentCount + 1;
+            }
+        }
+    }
+}
 
 async function loadCurrentUser() {
     try {
@@ -6017,16 +6232,15 @@ function renderGeoMap(geoData) {
             ]
         };
         
-        fetch('/static/maps/china.json')
-            .then(response => response.json())
-            .then(chinaJson => {
+        loadMapData('china').then(chinaJson => {
+            if (chinaJson) {
                 echarts.registerMap('china', chinaJson);
-                currentChart.setOption(option);
-            })
-            .catch(error => {
-                console.error('加载中国地图数据失败:', error);
-                renderSimpleMap(convertData(), 'china');
-            });
+            }
+            currentChart.setOption(option);
+        }).catch(error => {
+            console.error('加载中国地图数据失败:', error);
+            renderSimpleMap(convertData(), 'china');
+        });
     } else {
         option = {
             backgroundColor: '#ffffff',
@@ -6104,16 +6318,15 @@ function renderGeoMap(geoData) {
             ]
         };
         
-        fetch('/static/maps/world.json')
-            .then(response => response.json())
-            .then(worldJson => {
+        loadMapData('world').then(worldJson => {
+            if (worldJson) {
                 echarts.registerMap('world', worldJson);
-                currentChart.setOption(option);
-            })
-            .catch(error => {
-                console.error('加载世界地图数据失败:', error);
-                renderSimpleMap(convertData(), 'world');
-            });
+            }
+            currentChart.setOption(option);
+        }).catch(error => {
+            console.error('加载世界地图数据失败:', error);
+            renderSimpleMap(convertData(), 'world');
+        });
     }
 }
 
@@ -6419,16 +6632,15 @@ function renderGeoMapMobile() {
             ]
         };
 
-        fetch('/static/maps/china.json')
-            .then(response => response.json())
-            .then(chinaJson => {
+        loadMapData('china').then(chinaJson => {
+            if (chinaJson) {
                 echarts.registerMap('china', chinaJson);
-                currentChart.setOption(option);
-            })
-            .catch(error => {
-                console.error('加载中国地图数据失败:', error);
-                renderSimpleMapMobile(convertData(), 'china');
-            });
+            }
+            currentChart.setOption(option);
+        }).catch(error => {
+            console.error('加载中国地图数据失败:', error);
+            renderSimpleMapMobile(convertData(), 'china');
+        });
     } else {
         option = {
             backgroundColor: '#ffffff',
@@ -6506,16 +6718,15 @@ function renderGeoMapMobile() {
             ]
         };
 
-        fetch('/static/maps/world.json')
-            .then(response => response.json())
-            .then(worldJson => {
+        loadMapData('world').then(worldJson => {
+            if (worldJson) {
                 echarts.registerMap('world', worldJson);
-                currentChart.setOption(option);
-            })
-            .catch(error => {
-                console.error('加载世界地图数据失败:', error);
-                renderSimpleMapMobile(convertData(), 'world');
-            });
+            }
+            currentChart.setOption(option);
+        }).catch(error => {
+            console.error('加载世界地图数据失败:', error);
+            renderSimpleMapMobile(convertData(), 'world');
+        });
     }
 }
 
@@ -6703,8 +6914,9 @@ function formatNumber(num) {
 document.addEventListener('DOMContentLoaded', async () => {
     const prevDayRadio = document.querySelector('input[name="compare"][value="prev-day"]');
     if (prevDayRadio) prevDayRadio.checked = true;
-    
+
     loadCurrentUser();
+    initWebSocket();
     loadSystemSettings();
     loadAvailableRules();
     await loadWAFInstances();
@@ -6734,12 +6946,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (window.geoMapChartWorldMobile) window.geoMapChartWorldMobile.resize();
         if (window.geoMapChartChinaMobile) window.geoMapChartChinaMobile.resize();
     });
-    
+
     setInterval(() => {
         const activeTab = document.querySelector('.tab-content.active');
         if (activeTab && activeTab.id === 'logs-tab') {
             loadLogs();
         }
-        loadStats();
     }, 3000);
 });

@@ -44,11 +44,12 @@ import (
 	"github.com/go-acme/lego/v4/registration"
 	"github.com/go-acme/lego/v4/certificate"
 	"github.com/oschwald/geoip2-golang"
+	"github.com/gorilla/websocket"
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.6"
-const localVersionInt = 4060 // 版本整数值，用于对比
+const frontendVersion = "v0.4.7"
+const localVersionInt = 4070 // 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
@@ -57,6 +58,107 @@ var portForwardInstances = make(map[string]*PortForwardInstance)
 var certificates = make(map[string]*Certificate)
 var certificateLogs = make(map[string][]string)
 var certificateLogMutex sync.Mutex
+
+var wsHub *WebSocketHub
+
+type WebSocketHub struct {
+	clients    map[*websocket.Conn]bool
+	broadcast  chan []byte
+	register   chan *websocket.Conn
+	unregister chan *websocket.Conn
+	mutex      sync.RWMutex
+}
+
+func NewWebSocketHub() *WebSocketHub {
+	return &WebSocketHub{
+		clients:    make(map[*websocket.Conn]bool),
+		broadcast:  make(chan []byte, 256),
+		register:   make(chan *websocket.Conn),
+		unregister: make(chan *websocket.Conn),
+	}
+}
+
+func (h *WebSocketHub) Run() {
+	for {
+		select {
+		case client := <-h.register:
+			h.mutex.Lock()
+			h.clients[client] = true
+			h.mutex.Unlock()
+			log.Printf("WebSocket客户端连接，当前连接数: %d", len(h.clients))
+		case client := <-h.unregister:
+			h.mutex.Lock()
+			if _, ok := h.clients[client]; ok {
+				delete(h.clients, client)
+				client.Close()
+			}
+			h.mutex.Unlock()
+			log.Printf("WebSocket客户端断开，当前连接数: %d", len(h.clients))
+		case message := <-h.broadcast:
+			h.mutex.RLock()
+			for client := range h.clients {
+				err := client.WriteMessage(websocket.TextMessage, message)
+				if err != nil {
+					client.Close()
+					delete(h.clients, client)
+				}
+			}
+			h.mutex.RUnlock()
+		}
+	}
+}
+
+func (h *WebSocketHub) Broadcast(msgType string, data interface{}) {
+	msg := map[string]interface{}{
+		"type": msgType,
+		"data": data,
+	}
+	jsonData, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("WebSocket广播序列化失败: %v", err)
+		return
+	}
+	select {
+	case h.broadcast <- jsonData:
+	default:
+		log.Printf("WebSocket广播通道已满，丢弃消息: %s", msgType)
+	}
+}
+
+type WSMessage struct {
+	Type string      `json:"type"`
+	Data interface{} `json:"data"`
+}
+
+var wsUpgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := wsUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("WebSocket升级失败: %v", err)
+		return
+	}
+
+	wsHub.register <- conn
+
+	go func() {
+		defer func() {
+			wsHub.unregister <- conn
+		}()
+		for {
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+		}
+	}()
+}
 
 func addCertLog(certID, message string) {
 	certificateLogMutex.Lock()
@@ -1551,6 +1653,17 @@ func updateHistory() {
 		lastBlockedCount = currentStats.BlockedCount
 		lastInboundBytes = trafficStats.InboundBytes
 		lastOutboundBytes = trafficStats.OutboundBytes
+
+		if wsHub != nil {
+			statsData := map[string]interface{}{
+				"statistics":     currentStats,
+				"trafficStats":   trafficStats,
+				"qpsHistory":     qpsHistory,
+				"attackHistory":  attackHistory,
+				"trafficHistory": trafficHistory,
+			}
+			wsHub.Broadcast("statistics", statsData)
+		}
 	}
 }
 
@@ -2950,7 +3063,11 @@ func saveAttackLog(action, url, attackType, ip, rules, method, proxyID string, s
 	}
 	
 	attackLogs = append(attackLogs, logEntry)
-	
+
+	if wsHub != nil {
+		wsHub.Broadcast("attack_log", logEntry)
+	}
+
 	if len(attackLogs) > 1000 {
 		attackLogs = attackLogs[len(attackLogs)-1000:]
 	}
@@ -6397,11 +6514,24 @@ func handleStatistics(w http.ResponseWriter, r *http.Request) {
 	stats.DetectedProvinceDistribution = detectedProvinceStats
 	stats.BlockedGeoDistribution = blockedCountryStats
 	stats.BlockedProvinceDistribution = blockedProvinceStats
-	
+
+	currentStats.UniqueIP = len(uniqueIPs)
+	currentStats.AttackIP = attackIPs
+	currentStats.GeoDistribution = countryStats
+	currentStats.ProvinceDistribution = provinceStats
+	currentStats.AccessGeoDistribution = accessCountryStats
+	currentStats.AccessProvinceDistribution = accessProvinceStats
+	currentStats.DetectedGeoDistribution = detectedCountryStats
+	currentStats.DetectedProvinceDistribution = detectedProvinceStats
+	currentStats.BlockedGeoDistribution = blockedCountryStats
+	currentStats.BlockedProvinceDistribution = blockedProvinceStats
+
 	if stats.QPS > 0 {
 		stats.AvgResponseTime = 1000 / int64(stats.QPS)
+		currentStats.AvgResponseTime = 1000 / int64(stats.QPS)
 	} else {
 		stats.AvgResponseTime = 0
+		currentStats.AvgResponseTime = 0
 	}
 
 	json.NewEncoder(w).Encode(stats)
@@ -8194,8 +8324,11 @@ func main() {
 	}()
 
 	mux := http.NewServeMux()
-	
-	
+
+	wsHub = NewWebSocketHub()
+	go wsHub.Run()
+	mux.HandleFunc("/ws", handleWebSocket)
+
 	mux.HandleFunc("/api/login", handleLogin)
 	mux.HandleFunc("/api/logout", readOnlyMiddleware(handleLogout))
 	mux.HandleFunc("/api/current-user", handleCurrentUser)
