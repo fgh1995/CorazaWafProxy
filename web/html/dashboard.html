@@ -710,6 +710,8 @@
         }
 
         const dashboard = {
+            ws: null,
+            wsConnected: false,
             refreshInterval: null,
             map: null,
             markers: [],
@@ -765,6 +767,144 @@
                     this.alert1Sound.play().catch(e => console.log('播放alert1声音失败:', e));
                 }
             },
+
+            initWebSocket() {
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                    return;
+                }
+
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsUrl = protocol + '//' + window.location.host + '/ws';
+
+                this.ws = new WebSocket(wsUrl);
+
+                this.ws.onopen = () => {
+                    console.log('Dashboard WebSocket connected');
+                    this.wsConnected = true;
+                    this.ws.send(JSON.stringify({ type: 'stats' }));
+                    this.startAutoRefresh();
+                };
+
+                this.ws.onclose = () => {
+                    console.log('Dashboard WebSocket disconnected');
+                    this.wsConnected = false;
+                    this.stopAutoRefresh();
+                    setTimeout(() => {
+                        this.initWebSocket();
+                    }, 3000);
+                };
+
+                this.ws.onerror = (error) => {
+                    console.error('Dashboard WebSocket error:', error);
+                };
+
+                this.ws.onmessage = (event) => {
+                    try {
+                        const message = JSON.parse(event.data);
+                        this.handleWSMessage(message);
+                    } catch (e) {
+                        console.error('Failed to parse WebSocket message:', e);
+                    }
+                };
+            },
+
+            handleWSMessage(message) {
+                if (message.type === 'stats' && message.data) {
+                    const { stats, history, clientStats, latestAttackLogs, latestIPBlockLogs } = message.data;
+                    this.updateStats(stats, history);
+
+                    if (latestAttackLogs && latestAttackLogs.length > 0) {
+                        this.updateLogsFromWS(latestAttackLogs);
+                    }
+                    if (latestIPBlockLogs && latestIPBlockLogs.length > 0) {
+                        this.updateIPBlockLogsFromWS(latestIPBlockLogs);
+                    }
+                }
+            },
+
+            updateLogsFromWS(logs) {
+                if (logs.length > 0 && this.attackLogsLoaded.length > 0) {
+                    const latestLoadedId = this.attackLogsLoaded[0].id;
+                    const newAttackLogs = logs.filter(log => log.id > latestLoadedId);
+
+                    if (newAttackLogs.length > 0) {
+                        console.log('[WS] 发现新的攻击日志:', newAttackLogs.length, '条');
+                        const latestNewLogId = newAttackLogs[0].id;
+                        if (latestNewLogId > this.lastAttackLogId) {
+                            this.lastAttackLogId = latestNewLogId;
+                        }
+                        this.attackLogsLoaded = [...newAttackLogs, ...this.attackLogsLoaded];
+                        this.updateLogs(this.attackLogsLoaded);
+                        this.updateMapData(this.attackLogsLoaded);
+                        this.playAlertSound();
+                    }
+                } else if (logs.length > 0 && this.attackLogsLoaded.length === 0) {
+                    console.log('[WS] 首次加载攻击日志:', logs.length, '条');
+                    this.attackLogsLoaded = [...logs];
+                    this.lastAttackLogId = logs[0].id;
+                    this.updateLogs(this.attackLogsLoaded);
+                    this.updateMapData(this.attackLogsLoaded);
+                }
+            },
+
+            updateIPBlockLogsFromWS(logs) {
+                if (logs.length > 0 && this.ipBlockLogsLoaded.length > 0) {
+                    const latestLoadedId = this.ipBlockLogsLoaded[0].id;
+                    const newIPBlockLogs = logs.filter(log => log.id > latestLoadedId);
+
+                    if (newIPBlockLogs.length > 0) {
+                        console.log('[WS] 发现新的IP封锁日志:', newIPBlockLogs.length, '条');
+                        const latestNewLogId = newIPBlockLogs[0].id;
+                        if (latestNewLogId > this.lastIPBlockLogId) {
+                            this.lastIPBlockLogId = latestNewLogId;
+                        }
+                        this.ipBlockLogsLoaded = [...newIPBlockLogs, ...this.ipBlockLogsLoaded];
+                        this.updateIPBlockLogs(this.ipBlockLogsLoaded);
+                    }
+                } else if (logs.length > 0 && this.ipBlockLogsLoaded.length === 0) {
+                    console.log('[WS] 首次加载IP封锁日志:', logs.length, '条');
+                    this.ipBlockLogsLoaded = [...logs];
+                    this.lastIPBlockLogId = logs[0].id;
+                    this.updateIPBlockLogs(this.ipBlockLogsLoaded);
+                }
+            },
+
+            updateStats(stats, history) {
+                if (history) {
+                    if (history.qpsHistory) this.qpsHistory = history.qpsHistory;
+                    if (history.attackHistory) this.attackHistory = history.attackHistory;
+                    if (history.trafficHistory) this.trafficHistory = history.trafficHistory;
+                }
+
+                if (stats) {
+                    this.updateCharts(stats);
+                    this.updateTraffic(history);
+                    this.updateQPS(history);
+                    this.updateAttack(history);
+                }
+            },
+
+            updateCharts(stats) {
+                const pvElement = document.getElementById('totalPv');
+                const uvElement = document.getElementById('totalUv');
+                const attackElement = document.getElementById('totalAttack');
+
+                if (pvElement) pvElement.textContent = this.formatNumber(stats.pv || 0);
+                if (uvElement) uvElement.textContent = this.formatNumber(stats.uv || 0);
+                if (attackElement) attackElement.textContent = this.formatNumber(stats.blockedCount || 0);
+
+                const pvPeakElement = document.getElementById('pvPeakValue');
+                const blockPeakElement = document.getElementById('blockPeakValue');
+                if (pvPeakElement) pvPeakElement.textContent = this.formatNumber(stats.pvPeak || 0);
+                if (blockPeakElement) blockPeakElement.textContent = this.formatNumber(stats.blockPeak || 0);
+            },
+
+            formatNumber(num) {
+                if (num == null) return '0';
+                if (num >= 100000000) return (num / 100000000).toFixed(1) + '亿';
+                if (num >= 10000) return (num / 10000).toFixed(1) + '万';
+                return num.toString();
+            },
             
             init() {
                 this.initMap();
@@ -773,7 +913,7 @@
                 this.loadStats();
                 this.loadServerLocation().then(() => {
                     this.loadLogs().then(() => {
-                        this.startAutoRefresh();
+                        this.initWebSocket();
                     });
                 });
             },
@@ -2247,10 +2387,19 @@
             },
             
             startAutoRefresh() {
-                this.refreshInterval = setInterval(async () => {
-                    await this.loadStats();
-                    await this.loadNewLogs();
+                this.stopAutoRefresh();
+                this.refreshInterval = setInterval(() => {
+                    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                        this.ws.send(JSON.stringify({ type: 'stats' }));
+                    }
                 }, 2000);
+            },
+
+            stopAutoRefresh() {
+                if (this.refreshInterval) {
+                    clearInterval(this.refreshInterval);
+                    this.refreshInterval = null;
+                }
             },
             
             async loadNewLogs() {

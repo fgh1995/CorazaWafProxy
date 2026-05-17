@@ -48,8 +48,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.7"
-const localVersionInt = 4070 // 版本整数值，用于对比
+const frontendVersion = "v0.4.8"
+const localVersionInt = 4080 // 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
@@ -58,107 +58,6 @@ var portForwardInstances = make(map[string]*PortForwardInstance)
 var certificates = make(map[string]*Certificate)
 var certificateLogs = make(map[string][]string)
 var certificateLogMutex sync.Mutex
-
-var wsHub *WebSocketHub
-
-type WebSocketHub struct {
-	clients    map[*websocket.Conn]bool
-	broadcast  chan []byte
-	register   chan *websocket.Conn
-	unregister chan *websocket.Conn
-	mutex      sync.RWMutex
-}
-
-func NewWebSocketHub() *WebSocketHub {
-	return &WebSocketHub{
-		clients:    make(map[*websocket.Conn]bool),
-		broadcast:  make(chan []byte, 256),
-		register:   make(chan *websocket.Conn),
-		unregister: make(chan *websocket.Conn),
-	}
-}
-
-func (h *WebSocketHub) Run() {
-	for {
-		select {
-		case client := <-h.register:
-			h.mutex.Lock()
-			h.clients[client] = true
-			h.mutex.Unlock()
-			log.Printf("WebSocket客户端连接，当前连接数: %d", len(h.clients))
-		case client := <-h.unregister:
-			h.mutex.Lock()
-			if _, ok := h.clients[client]; ok {
-				delete(h.clients, client)
-				client.Close()
-			}
-			h.mutex.Unlock()
-			log.Printf("WebSocket客户端断开，当前连接数: %d", len(h.clients))
-		case message := <-h.broadcast:
-			h.mutex.RLock()
-			for client := range h.clients {
-				err := client.WriteMessage(websocket.TextMessage, message)
-				if err != nil {
-					client.Close()
-					delete(h.clients, client)
-				}
-			}
-			h.mutex.RUnlock()
-		}
-	}
-}
-
-func (h *WebSocketHub) Broadcast(msgType string, data interface{}) {
-	msg := map[string]interface{}{
-		"type": msgType,
-		"data": data,
-	}
-	jsonData, err := json.Marshal(msg)
-	if err != nil {
-		log.Printf("WebSocket广播序列化失败: %v", err)
-		return
-	}
-	select {
-	case h.broadcast <- jsonData:
-	default:
-		log.Printf("WebSocket广播通道已满，丢弃消息: %s", msgType)
-	}
-}
-
-type WSMessage struct {
-	Type string      `json:"type"`
-	Data interface{} `json:"data"`
-}
-
-var wsUpgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
-}
-
-func handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := wsUpgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("WebSocket升级失败: %v", err)
-		return
-	}
-
-	wsHub.register <- conn
-
-	go func() {
-		defer func() {
-			wsHub.unregister <- conn
-		}()
-		for {
-			_, _, err := conn.ReadMessage()
-			if err != nil {
-				break
-			}
-		}
-	}()
-}
 
 func addCertLog(certID, message string) {
 	certificateLogMutex.Lock()
@@ -179,6 +78,552 @@ func clearCertLogs(certID string) {
 	certificateLogMutex.Lock()
 	defer certificateLogMutex.Unlock()
 	delete(certificateLogs, certID)
+}
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+}
+
+type WSClient struct {
+	conn   *websocket.Conn
+	send   chan []byte
+	userID string
+}
+
+type WSHub struct {
+	clients    map[*WSClient]bool
+	broadcast  chan []byte
+	register   chan *WSClient
+	unregister chan *WSClient
+	mu         sync.RWMutex
+}
+
+var wsHub = &WSHub{
+	clients:    make(map[*WSClient]bool),
+	broadcast:  make(chan []byte),
+	register:   make(chan *WSClient),
+	unregister: make(chan *WSClient),
+}
+
+func (h *WSHub) run() {
+	for {
+		select {
+		case client := <-h.register:
+			h.mu.Lock()
+			h.clients[client] = true
+			h.mu.Unlock()
+			log.Printf("WebSocket客户端连接，用户: %s，当前连接数: %d", client.userID, len(h.clients))
+
+		case client := <-h.unregister:
+			h.mu.Lock()
+			if _, ok := h.clients[client]; ok {
+				delete(h.clients, client)
+				close(client.send)
+			}
+			h.mu.Unlock()
+			log.Printf("WebSocket客户端断开，用户: %s，当前连接数: %d", client.userID, len(h.clients))
+
+		case message := <-h.broadcast:
+			h.mu.RLock()
+			for client := range h.clients {
+				select {
+				case client.send <- message:
+				default:
+					close(client.send)
+					delete(h.clients, client)
+				}
+			}
+			h.mu.RUnlock()
+		}
+	}
+}
+
+type WSMessage struct {
+	Type string      `json:"type"`
+	Data interface{} `json:"data,omitempty"`
+}
+
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	session, err := r.Cookie("session")
+	if err != nil || session.Value == "" {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var userID string
+	err = db.QueryRow("SELECT id FROM users WHERE username = ?", session.Value).Scan(&userID)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("WebSocket升级失败: %v", err)
+		return
+	}
+
+	client := &WSClient{
+		conn:   conn,
+		send:   make(chan []byte, 256),
+		userID: userID,
+	}
+
+	wsHub.register <- client
+
+	go client.writePump()
+	go client.readPump()
+}
+
+func (c *WSClient) readPump() {
+	defer func() {
+		wsHub.unregister <- c
+		c.conn.Close()
+	}()
+
+	for {
+		_, messageData, err := c.conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("WebSocket读取错误: %v", err)
+			}
+			break
+		}
+
+		var msg WSMessage
+		if err := json.Unmarshal(messageData, &msg); err != nil {
+			log.Printf("WebSocket消息解析失败: %v", err)
+			continue
+		}
+
+		c.handleMessage(msg)
+	}
+}
+
+func (c *WSClient) writePump() {
+	defer c.conn.Close()
+
+	for {
+		message, ok := <-c.send
+		if !ok {
+			c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+			return
+		}
+
+		if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+			return
+		}
+	}
+}
+
+func (c *WSClient) handleMessage(msg WSMessage) {
+	switch msg.Type {
+	case "stats":
+		c.handleStatsRequest()
+	case "logs":
+		c.handleLogsRequest(msg.Data)
+	case "ping":
+		c.send <- []byte(`{"type":"pong"}`)
+	}
+}
+
+func (c *WSClient) handleStatsRequest() {
+	startTime := time.Now()
+	statsMutex.RLock()
+	stats := currentStats
+	statsMutex.RUnlock()
+
+	attackIPs := 0
+	countryStats := make(map[string]int)
+	provinceStats := make(map[string]int)
+	accessCountryStats := make(map[string]int)
+	accessProvinceStats := make(map[string]int)
+	detectedCountryStats := make(map[string]int)
+	detectedProvinceStats := make(map[string]int)
+	blockedCountryStats := make(map[string]int)
+	blockedProvinceStats := make(map[string]int)
+
+	q1Start := time.Now()
+	rows, err := db.Query("SELECT ip, country, province, action FROM attack_logs LIMIT 500")
+	log.Printf("[DEBUG] attack_logs查询时间: %v", time.Since(q1Start))
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var ip, country, province, action string
+			rows.Scan(&ip, &country, &province, &action)
+
+			if country != "" {
+				accessCountryStats[country]++
+			}
+			if country == "中国" && province != "" {
+				accessProvinceStats[province]++
+			}
+
+			if action != "normal" {
+				attackIPs++
+				countryStats[country]++
+				if country == "中国" && province != "" {
+					provinceStats[province]++
+				}
+			}
+
+			if action == "detected" {
+				if country != "" {
+					detectedCountryStats[country]++
+				}
+				if country == "中国" && province != "" {
+					detectedProvinceStats[province]++
+				}
+			}
+
+			if action == "blocked" {
+				if country != "" {
+					blockedCountryStats[country]++
+				}
+				if country == "中国" && province != "" {
+					blockedProvinceStats[province]++
+				}
+			}
+		}
+	}
+
+	q2Start := time.Now()
+	ipAccessRows, err := db.Query("SELECT ip, country, province, mode, action, result FROM ip_access_logs WHERE result != 'pass' LIMIT 500")
+	log.Printf("[DEBUG] ip_access_logs查询时间: %v", time.Since(q2Start))
+	if err == nil {
+		defer ipAccessRows.Close()
+		for ipAccessRows.Next() {
+			var ip, country, province, mode, action, result string
+			ipAccessRows.Scan(&ip, &country, &province, &mode, &action, &result)
+
+			if country != "" {
+				accessCountryStats[country]++
+			}
+			if country == "中国" && province != "" {
+				accessProvinceStats[province]++
+			}
+
+			attackIPs++
+			countryStats[country]++
+			if country == "中国" && province != "" {
+				provinceStats[province]++
+			}
+
+			if result == "observe" {
+				if country != "" {
+					detectedCountryStats[country]++
+				}
+				if country == "中国" && province != "" {
+					detectedProvinceStats[province]++
+				}
+			}
+
+			if result == "block" {
+				if country != "" {
+					blockedCountryStats[country]++
+				}
+				if country == "中国" && province != "" {
+					blockedProvinceStats[province]++
+				}
+			}
+		}
+	}
+
+	uniqueIPs := make(map[string]bool)
+	rows, err = db.Query("SELECT DISTINCT ip FROM attack_logs LIMIT 500")
+	if err == nil {
+		for rows.Next() {
+			var ip string
+			rows.Scan(&ip)
+			uniqueIPs[ip] = true
+		}
+		rows.Close()
+	}
+
+	ipAccessRows, err = db.Query("SELECT DISTINCT ip FROM ip_access_logs WHERE result != 'pass' LIMIT 500")
+	if err == nil {
+		defer ipAccessRows.Close()
+		for ipAccessRows.Next() {
+			var ip string
+			ipAccessRows.Scan(&ip)
+			uniqueIPs[ip] = true
+		}
+	}
+
+	stats.UniqueIP = len(uniqueIPs)
+	stats.AttackIP = attackIPs
+	stats.GeoDistribution = countryStats
+	stats.ProvinceDistribution = provinceStats
+	stats.AccessGeoDistribution = accessCountryStats
+	stats.AccessProvinceDistribution = accessProvinceStats
+	stats.DetectedGeoDistribution = detectedCountryStats
+	stats.DetectedProvinceDistribution = detectedProvinceStats
+	stats.BlockedGeoDistribution = blockedCountryStats
+	stats.BlockedProvinceDistribution = blockedProvinceStats
+
+	if stats.QPS > 0 {
+		stats.AvgResponseTime = 1000 / int64(stats.QPS)
+	} else {
+		stats.AvgResponseTime = 0
+	}
+
+	statsMutex.RLock()
+	history := map[string]interface{}{
+		"qpsHistory":     qpsHistory,
+		"attackHistory":  attackHistory,
+		"trafficHistory": trafficHistory,
+		"trafficStats":   trafficStats,
+	}
+	statsMutex.RUnlock()
+
+	currentHour := time.Now().UTC().Hour()
+
+	trendCacheMutex.RLock()
+	needRefresh := currentHour != lastTrendUpdateHour || len(cachedTodayTrend) == 0
+	trendCacheMutex.RUnlock()
+
+	if needRefresh {
+		refreshTrendCache()
+	}
+
+	trendCacheMutex.RLock()
+	todayTrend := cachedTodayTrend
+	yesterdayTrend := cachedYesterdayTrend
+	trendCacheMutex.RUnlock()
+
+	date := time.Now().Format("2006-01-02")
+	compareDate := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+
+	trendData := map[string]interface{}{
+		"date":          date,
+		"compareDate":   compareDate,
+		"compareType":   "prev-day",
+		"todayTrend":    todayTrend,
+		"compareTrend":  yesterdayTrend,
+	}
+
+	platformStats := make(map[string]int)
+	browserStats := make(map[string]int)
+
+	q3Start := time.Now()
+	platformRows, err := db.Query(`
+		SELECT platform, browser, COUNT(*) as cnt
+		FROM attack_logs
+		WHERE platform IS NOT NULL AND platform != 'Unknown'
+		AND browser IS NOT NULL AND browser != 'Unknown'
+		GROUP BY platform, browser
+		ORDER BY cnt DESC
+		LIMIT 500
+	`)
+	log.Printf("[DEBUG] platform/browser查询时间: %v", time.Since(q3Start))
+	if err == nil {
+		defer platformRows.Close()
+		for platformRows.Next() {
+			var platform, browser string
+			var cnt int
+			platformRows.Scan(&platform, &browser, &cnt)
+			platformStats[platform] += cnt
+			browserStats[browser] += cnt
+		}
+	}
+	log.Printf("[DEBUG] platformStats: %v", platformStats)
+	log.Printf("[DEBUG] browserStats: %v", browserStats)
+
+	type TopStatsItem struct {
+		Name  string `json:"name"`
+		Count int    `json:"count"`
+	}
+
+	platformList := make([]TopStatsItem, 0)
+	for name, count := range platformStats {
+		platformList = append(platformList, TopStatsItem{Name: name, Count: count})
+	}
+	sort.Slice(platformList, func(i, j int) bool {
+		return platformList[i].Count > platformList[j].Count
+	})
+	if len(platformList) > 5 {
+		platformList = platformList[:5]
+	}
+
+	browserList := make([]TopStatsItem, 0)
+	for name, count := range browserStats {
+		browserList = append(browserList, TopStatsItem{Name: name, Count: count})
+	}
+	sort.Slice(browserList, func(i, j int) bool {
+		return browserList[i].Count > browserList[j].Count
+	})
+	if len(browserList) > 5 {
+		browserList = browserList[:5]
+	}
+
+	clientStatsData := map[string]interface{}{
+		"platformStats": platformList,
+		"browserStats":  browserList,
+	}
+	log.Printf("[DEBUG] clientStatsData: platformStats=%v, browserStats=%v", platformList, browserList)
+
+	latestAttackLogs := func() []map[string]interface{} {
+		rows, err := db.Query("SELECT id, action, url, attack_type, ip, time, country, province FROM attack_logs WHERE action != 'normal' ORDER BY time DESC LIMIT 50")
+		if err != nil {
+			return []map[string]interface{}{}
+		}
+		defer rows.Close()
+		logs := make([]map[string]interface{}, 0)
+		for rows.Next() {
+			var id int64
+			var action, url, attackType, ip, timeStr, country, province string
+			rows.Scan(&id, &action, &url, &attackType, &ip, &timeStr, &country, &province)
+			logs = append(logs, map[string]interface{}{
+				"id":         id,
+				"action":     action,
+				"url":        url,
+				"attackType": attackType,
+				"ip":         ip,
+				"time":       timeStr,
+				"country":    country,
+				"province":   province,
+			})
+		}
+		return logs
+	}
+
+	latestIPBlockLogs := func() []map[string]interface{} {
+		rows, err := db.Query("SELECT id, ip, country, province, result, created_at FROM ip_access_logs WHERE result != 'pass' ORDER BY created_at DESC LIMIT 50")
+		if err != nil {
+			return []map[string]interface{}{}
+		}
+		defer rows.Close()
+		logs := make([]map[string]interface{}, 0)
+		for rows.Next() {
+			var id int64
+			var ip, country, province, result string
+			var createdAt int64
+			rows.Scan(&id, &ip, &country, &province, &result, &createdAt)
+			logs = append(logs, map[string]interface{}{
+				"id":         id,
+				"ip":         ip,
+				"country":    country,
+				"province":   province,
+				"result":     result,
+				"createdAt":  createdAt,
+			})
+		}
+		return logs
+	}
+
+	response := WSMessage{
+		Type: "stats",
+		Data: map[string]interface{}{
+			"stats":           stats,
+			"history":         history,
+			"clientStats":     clientStatsData,
+			"trendData":       trendData,
+			"latestAttackLogs":  latestAttackLogs(),
+			"latestIPBlockLogs": latestIPBlockLogs(),
+		},
+	}
+
+	data, err := json.Marshal(response)
+	if err != nil {
+		return
+	}
+	log.Printf("[handleStatsRequest] 处理时间: %v", time.Since(startTime))
+	c.send <- data
+}
+
+func (c *WSClient) handleLogsRequest(data interface{}) {
+	filter := "attack"
+	pageSize := 50
+
+	if dataMap, ok := data.(map[string]interface{}); ok {
+		if f, ok := dataMap["filter"].(string); ok {
+			filter = f
+		}
+		if ps, ok := dataMap["pageSize"].(float64); ok {
+			pageSize = int(ps)
+		}
+	}
+
+	var dataQuery string
+	if filter == "normal" {
+		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs WHERE action = 'normal' ORDER BY time DESC LIMIT ?"
+	} else if filter == "detected" {
+		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs WHERE action = 'detected' ORDER BY time DESC LIMIT ?"
+	} else if filter == "blocked" {
+		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs WHERE action = 'blocked' ORDER BY time DESC LIMIT ?"
+	} else {
+		dataQuery = "SELECT id, action, url, attack_type, ip, time, rules, method, proxy_id, status_code, country, province, city, latitude, longitude, filter_type FROM attack_logs WHERE action != 'normal' ORDER BY time DESC LIMIT ?"
+	}
+
+	rows, err := db.Query(dataQuery, pageSize)
+	if err != nil {
+		log.Printf("WebSocket查询日志失败: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	logs := make([]AttackLog, 0)
+	for rows.Next() {
+		var entry AttackLog
+		var attackType sql.NullString
+		var proxyID sql.NullString
+		var country sql.NullString
+		var province sql.NullString
+		var city sql.NullString
+		var latitude sql.NullFloat64
+		var longitude sql.NullFloat64
+		var filterType sql.NullString
+
+		err := rows.Scan(&entry.ID, &entry.Action, &entry.URL, &attackType, &entry.IP, &entry.Time, &entry.Rules, &entry.Method, &proxyID, &entry.StatusCode, &country, &province, &city, &latitude, &longitude, &filterType)
+		if err != nil {
+			continue
+		}
+
+		if attackType.Valid {
+			entry.AttackType = attackType.String
+		}
+		if proxyID.Valid {
+			entry.ProxyID = proxyID.String
+		}
+		if country.Valid {
+			entry.Country = country.String
+		}
+		if province.Valid {
+			entry.Province = province.String
+		}
+		if city.Valid {
+			entry.City = city.String
+		}
+		if latitude.Valid {
+			entry.Latitude = latitude.Float64
+		}
+		if longitude.Valid {
+			entry.Longitude = longitude.Float64
+		}
+		if filterType.Valid {
+			entry.FilterType = filterType.String
+		}
+
+		logs = append(logs, entry)
+	}
+
+	response := WSMessage{
+		Type: "logs",
+		Data: map[string]interface{}{
+			"logs":   logs,
+			"filter": filter,
+		},
+	}
+
+	responseData, err := json.Marshal(response)
+	if err != nil {
+		return
+	}
+	c.send <- responseData
 }
 
 var wafMutex sync.RWMutex
@@ -280,6 +725,67 @@ func getUTCTime() string {
 
 func getUTCTimestamp() int64 {
 	return time.Now().UTC().Unix()
+}
+
+func refreshTrendCache() {
+	trendCacheMutex.Lock()
+	defer trendCacheMutex.Unlock()
+
+	currentHour := time.Now().UTC().Hour()
+	lastTrendUpdateHour = currentHour
+
+	queryHourlyTrend := func(queryDate string) []HourlyTrend {
+		year, month, day := time.Now().UTC().Date()
+		if queryDate != time.Now().Format("2006-01-02") {
+			t, _ := time.Parse("2006-01-02", queryDate)
+			year, month, day = t.UTC().Date()
+		}
+		startOfDay := time.Date(year, month, day, 0, 0, 0, 0, time.UTC).Unix()
+		endOfDay := time.Date(year, month, day, 23, 59, 59, 0, time.UTC).Unix()
+
+		rows, err := db.Query(`
+			SELECT
+				CAST((created_at - ?) / 3600 AS INTEGER) as hour,
+				COALESCE(COUNT(DISTINCT CASE WHEN result != 'pass' THEN ip END), 0) as abnormal_ip_count,
+				COALESCE(SUM(CASE WHEN result = 'block' THEN 1 ELSE 0 END), 0) as block_count,
+				COALESCE(SUM(CASE WHEN result = 'observe' THEN 1 ELSE 0 END), 0) as observe_count
+			FROM ip_access_logs
+			WHERE created_at >= ? AND created_at <= ?
+			GROUP BY hour
+			ORDER BY hour
+		`, startOfDay, startOfDay, endOfDay)
+
+		if err != nil {
+			log.Printf("查询趋势数据失败: %v", err)
+			return make([]HourlyTrend, 0)
+		}
+		defer rows.Close()
+
+		hourlyMap := make(map[int]HourlyTrend)
+		for rows.Next() {
+			var trend HourlyTrend
+			rows.Scan(&trend.Hour, &trend.AbnormalIPCount, &trend.BlockCount, &trend.ObserveCount)
+			hourlyMap[trend.Hour] = trend
+		}
+
+		result := make([]HourlyTrend, 24)
+		for i := 0; i < 24; i++ {
+			if t, ok := hourlyMap[i]; ok {
+				result[i] = t
+			} else {
+				result[i] = HourlyTrend{Hour: i, AbnormalIPCount: 0, BlockCount: 0, ObserveCount: 0}
+			}
+		}
+		return result
+	}
+
+	date := time.Now().Format("2006-01-02")
+	compareDate := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+
+	log.Printf("[DEBUG] refreshTrendCache: 更新趋势数据")
+	cachedTodayTrend = queryHourlyTrend(date)
+	cachedYesterdayTrend = queryHourlyTrend(compareDate)
+	log.Printf("[DEBUG] refreshTrendCache: 完成")
 }
 
 const currentDBVersion = "1.5"
@@ -962,6 +1468,20 @@ var trafficHistory []TrafficHistory
 var lastRequestCount int64
 var lastBlockedCount int64
 var lastUpdateTime time.Time
+
+type HourlyTrend struct {
+	Hour            int `json:"hour"`
+	AbnormalIPCount int `json:"abnormal_ip_count"`
+	BlockCount      int `json:"block_count"`
+	ObserveCount    int `json:"observe_count"`
+}
+
+var (
+	trendCacheMutex     sync.RWMutex
+	cachedTodayTrend    []HourlyTrend
+	cachedYesterdayTrend []HourlyTrend
+	lastTrendUpdateHour int
+)
 var lastInboundBytes int64
 var lastOutboundBytes int64
 var visitorMap = make(map[string]time.Time)
@@ -1135,6 +1655,10 @@ func initDB() error {
 		browser TEXT DEFAULT 'Unknown'
 	);
 
+	CREATE INDEX IF NOT EXISTS idx_attack_logs_time ON attack_logs(time DESC);
+	CREATE INDEX IF NOT EXISTS idx_attack_logs_action ON attack_logs(action);
+	CREATE INDEX IF NOT EXISTS idx_attack_logs_platform_browser ON attack_logs(platform, browser);
+
 	CREATE TABLE IF NOT EXISTS statistics (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		request_count INTEGER DEFAULT 0,
@@ -1199,6 +1723,10 @@ func initDB() error {
 		forward_info TEXT,
 		created_at INTEGER NOT NULL
 	);
+
+	CREATE INDEX IF NOT EXISTS idx_ip_access_logs_created_at ON ip_access_logs(created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_ip_access_logs_result ON ip_access_logs(result);
+	CREATE INDEX IF NOT EXISTS idx_ip_access_logs_created_at_date ON ip_access_logs(created_at);
 
 	CREATE TABLE IF NOT EXISTS webhook_settings (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1653,17 +2181,6 @@ func updateHistory() {
 		lastBlockedCount = currentStats.BlockedCount
 		lastInboundBytes = trafficStats.InboundBytes
 		lastOutboundBytes = trafficStats.OutboundBytes
-
-		if wsHub != nil {
-			statsData := map[string]interface{}{
-				"statistics":     currentStats,
-				"trafficStats":   trafficStats,
-				"qpsHistory":     qpsHistory,
-				"attackHistory":  attackHistory,
-				"trafficHistory": trafficHistory,
-			}
-			wsHub.Broadcast("statistics", statsData)
-		}
 	}
 }
 
@@ -2955,7 +3472,9 @@ func (wh *wafHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(http.StatusBadGateway)
 					http.ServeFile(w, r, "web/html/502.html")
 				}
-				rp.ServeHTTP(w, r)
+				statsRW := &statsResponseWriter{ResponseWriter: w, statusCode: 200}
+				r.Body = &statsRequestBody{ReadCloser: r.Body}
+				rp.ServeHTTP(statsRW, r)
 				return
 			}
 		}
@@ -3063,11 +3582,7 @@ func saveAttackLog(action, url, attackType, ip, rules, method, proxyID string, s
 	}
 	
 	attackLogs = append(attackLogs, logEntry)
-
-	if wsHub != nil {
-		wsHub.Broadcast("attack_log", logEntry)
-	}
-
+	
 	if len(attackLogs) > 1000 {
 		attackLogs = attackLogs[len(attackLogs)-1000:]
 	}
@@ -6514,24 +7029,11 @@ func handleStatistics(w http.ResponseWriter, r *http.Request) {
 	stats.DetectedProvinceDistribution = detectedProvinceStats
 	stats.BlockedGeoDistribution = blockedCountryStats
 	stats.BlockedProvinceDistribution = blockedProvinceStats
-
-	currentStats.UniqueIP = len(uniqueIPs)
-	currentStats.AttackIP = attackIPs
-	currentStats.GeoDistribution = countryStats
-	currentStats.ProvinceDistribution = provinceStats
-	currentStats.AccessGeoDistribution = accessCountryStats
-	currentStats.AccessProvinceDistribution = accessProvinceStats
-	currentStats.DetectedGeoDistribution = detectedCountryStats
-	currentStats.DetectedProvinceDistribution = detectedProvinceStats
-	currentStats.BlockedGeoDistribution = blockedCountryStats
-	currentStats.BlockedProvinceDistribution = blockedProvinceStats
-
+	
 	if stats.QPS > 0 {
 		stats.AvgResponseTime = 1000 / int64(stats.QPS)
-		currentStats.AvgResponseTime = 1000 / int64(stats.QPS)
 	} else {
 		stats.AvgResponseTime = 0
-		currentStats.AvgResponseTime = 0
 	}
 
 	json.NewEncoder(w).Encode(stats)
@@ -8314,6 +8816,7 @@ func main() {
 	}
 
 	updateHistory()
+	refreshTrendCache()
 
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
@@ -8323,12 +8826,22 @@ func main() {
 		}
 	}()
 
+	go func() {
+		for {
+			now := time.Now().UTC()
+			nextHour := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, time.UTC).Add(1 * time.Hour)
+			waitDuration := nextHour.Sub(now)
+			log.Printf("[趋势缓存] 下次刷新时间: %v 后 (UTC %v)", waitDuration, nextHour.Format("15:04:05"))
+			time.Sleep(waitDuration)
+			refreshTrendCache()
+		}
+	}()
+
+	go wsHub.run()
+
 	mux := http.NewServeMux()
-
-	wsHub = NewWebSocketHub()
-	go wsHub.Run()
-	mux.HandleFunc("/ws", handleWebSocket)
-
+	
+	
 	mux.HandleFunc("/api/login", handleLogin)
 	mux.HandleFunc("/api/logout", readOnlyMiddleware(handleLogout))
 	mux.HandleFunc("/api/current-user", handleCurrentUser)
@@ -8464,6 +8977,7 @@ func main() {
 
 	mux.HandleFunc("/api/webhook-settings", readOnlyMiddleware(handleWebhookSettings))
 	mux.HandleFunc("/api/defense-test", readOnlyMiddleware(handleDefenseTest))
+	mux.HandleFunc("/ws", handleWebSocket)
 	
 	mux.HandleFunc("/web/html/admin.html", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		content, err := os.ReadFile("web/html/admin.html")

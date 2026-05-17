@@ -11,6 +11,326 @@ let currentEditCertId = null;
 let confirmCallback = null;
 let activeTooltip = null;
 
+let ws = null;
+let wsConnected = false;
+let wsReconnectTimer = null;
+let wsPollTimer = null;
+
+let cachedWorldMapData = null;
+let cachedChinaMapData = null;
+
+async function loadMapData(mapType) {
+    if (mapType === 'world') {
+        if (cachedWorldMapData) {
+            return cachedWorldMapData;
+        }
+        try {
+            const response = await fetch('/static/maps/world.json');
+            cachedWorldMapData = await response.json();
+            return cachedWorldMapData;
+        } catch (error) {
+            console.error('加载世界地图数据失败:', error);
+            return null;
+        }
+    } else if (mapType === 'china') {
+        if (cachedChinaMapData) {
+            return cachedChinaMapData;
+        }
+        try {
+            const response = await fetch('/static/maps/china.json');
+            cachedChinaMapData = await response.json();
+            return cachedChinaMapData;
+        } catch (error) {
+            console.error('加载中国地图数据失败:', error);
+            return null;
+        }
+    }
+    return null;
+}
+
+function initWebSocket() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        return;
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = protocol + '//' + window.location.host + '/ws';
+
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+        console.log('WebSocket connected');
+        wsConnected = true;
+        if (wsReconnectTimer) {
+            clearTimeout(wsReconnectTimer);
+            wsReconnectTimer = null;
+        }
+        startWSPoll();
+    };
+
+    ws.onclose = () => {
+        console.log('WebSocket disconnected');
+        wsConnected = false;
+        stopWSPoll();
+        wsReconnectTimer = setTimeout(() => {
+            initWebSocket();
+        }, 3000);
+    };
+
+    ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+    };
+
+    ws.onmessage = (event) => {
+        try {
+            const message = JSON.parse(event.data);
+            handleWSMessage(message);
+        } catch (e) {
+            console.error('Failed to parse WebSocket message:', e);
+        }
+    };
+}
+
+function startWSPoll() {
+    stopWSPoll();
+    wsPollTimer = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'stats' }));
+        }
+    }, 2000);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'stats' }));
+    }
+}
+
+function stopWSPoll() {
+    if (wsPollTimer) {
+        clearInterval(wsPollTimer);
+        wsPollTimer = null;
+    }
+}
+
+function handleWSMessage(message) {
+    if (message.type === 'stats' && message.data) {
+        const { stats, history, clientStats, trendData } = message.data;
+        statsData = stats;
+        historyData = history;
+        top5ClientStats = clientStats;
+        fullClientStats = null;
+        if (trendData) {
+            currentTrendData = trendData;
+        }
+
+        updateStatsUI(stats, history, clientStats);
+    } else if (message.type === 'pong') {
+    }
+}
+
+function updateStatsUI(stats, history, clientStats) {
+    document.getElementById('statRequestCount').textContent = formatNumber(stats.requestCount);
+    document.getElementById('statPV').textContent = formatNumber(stats.pv);
+    document.getElementById('statUV').textContent = formatNumber(stats.uv);
+    document.getElementById('statUniqueIP').textContent = formatNumber(stats.uniqueIP);
+
+    document.getElementById('statRequestCount-mobile')?.setAttribute('data-value', stats.requestCount);
+    document.getElementById('statPV-mobile')?.setAttribute('data-value', stats.pv);
+    document.getElementById('statUV-mobile')?.setAttribute('data-value', stats.uv);
+    document.getElementById('statUniqueIP-mobile')?.setAttribute('data-value', stats.uniqueIP);
+    if (document.getElementById('statRequestCount-mobile')) document.getElementById('statRequestCount-mobile').textContent = formatNumber(stats.requestCount);
+    if (document.getElementById('statPV-mobile')) document.getElementById('statPV-mobile').textContent = formatNumber(stats.pv);
+    if (document.getElementById('statUV-mobile')) document.getElementById('statUV-mobile').textContent = formatNumber(stats.uv);
+    if (document.getElementById('statUniqueIP-mobile')) document.getElementById('statUniqueIP-mobile').textContent = formatNumber(stats.uniqueIP);
+
+    document.getElementById('statBlockedCount').textContent = formatNumber(stats.blockedCount);
+    document.getElementById('statAttackIP').textContent = formatNumber(stats.attackIP);
+    document.getElementById('stat4xxBlocked').textContent = formatNumber(stats.blockedCount);
+    document.getElementById('stat4xxBlockRate').textContent = stats.fourXxBlockRate ? stats.fourXxBlockRate.toFixed(2) + '%' : '0%';
+
+    if (document.getElementById('statBlockedCount-mobile')) document.getElementById('statBlockedCount-mobile').textContent = formatNumber(stats.blockedCount);
+    if (document.getElementById('statAttackIP-mobile')) document.getElementById('statAttackIP-mobile').textContent = formatNumber(stats.attackIP);
+    if (document.getElementById('stat4xxBlocked-mobile')) document.getElementById('stat4xxBlocked-mobile').textContent = formatNumber(stats.blockedCount);
+    if (document.getElementById('stat4xxBlockRate-mobile')) document.getElementById('stat4xxBlockRate-mobile').textContent = stats.fourXxBlockRate ? stats.fourXxBlockRate.toFixed(2) + '%' : '0%';
+
+    document.getElementById('stat4xxError').textContent = formatNumber(stats.fourXxError);
+    document.getElementById('stat4xxErrorRate').textContent = stats.fourXxErrorRate ? stats.fourXxErrorRate.toFixed(2) + '%' : '0%';
+    document.getElementById('stat5xxError').textContent = formatNumber(stats.fiveXxError);
+    document.getElementById('stat5xxErrorRate').textContent = stats.fiveXxErrorRate ? stats.fiveXxErrorRate.toFixed(2) + '%' : '0%';
+
+    if (document.getElementById('stat4xxError-mobile')) document.getElementById('stat4xxError-mobile').textContent = formatNumber(stats.fourXxError);
+    if (document.getElementById('stat4xxErrorRate-mobile')) document.getElementById('stat4xxErrorRate-mobile').textContent = stats.fourXxErrorRate ? stats.fourXxErrorRate.toFixed(2) + '%' : '0%';
+    if (document.getElementById('stat5xxError-mobile')) document.getElementById('stat5xxError-mobile').textContent = formatNumber(stats.fiveXxError);
+    if (document.getElementById('stat5xxErrorRate-mobile')) document.getElementById('stat5xxErrorRate-mobile').textContent = stats.fiveXxErrorRate ? stats.fiveXxErrorRate.toFixed(2) + '%' : '0%';
+
+    document.getElementById('statAvgResponseTime').textContent = stats.avgResponseTime > 0 ? stats.avgResponseTime + 'ms' : '-';
+    if (document.getElementById('statAvgResponseTime-mobile')) document.getElementById('statAvgResponseTime-mobile').textContent = stats.avgResponseTime > 0 ? stats.avgResponseTime + 'ms' : '-';
+    const qpsBadgeValue = document.getElementById('qps-badge-value');
+    if (qpsBadgeValue) {
+        qpsBadgeValue.textContent = stats.qps;
+    }
+    const qpsBadgeValueMobile = document.getElementById('qps-badge-value-mobile');
+    if (qpsBadgeValueMobile) {
+        qpsBadgeValueMobile.textContent = stats.qps;
+    }
+
+    const attackBadgeValue = document.getElementById('attack-badge-value');
+    if (attackBadgeValue) {
+        const attackHistory = history.attackHistory || [];
+        const currentAttack = attackHistory.length > 0 ? attackHistory[attackHistory.length - 1].count : 0;
+        attackBadgeValue.textContent = currentAttack;
+    }
+    const attackBadgeValueMobile = document.getElementById('attack-badge-value-mobile');
+    if (attackBadgeValueMobile) {
+        const attackHistory = history.attackHistory || [];
+        const currentAttack = attackHistory.length > 0 ? attackHistory[attackHistory.length - 1].count : 0;
+        attackBadgeValueMobile.textContent = currentAttack;
+    }
+
+    document.getElementById('statPVPeak').textContent = formatNumber(stats.pvPeak);
+    document.getElementById('statBlockPeak').textContent = formatNumber(stats.blockPeak);
+    document.getElementById('statWAFCount').textContent = wafInstances.length;
+    if (document.getElementById('statPVPeak-mobile')) document.getElementById('statPVPeak-mobile').textContent = formatNumber(stats.pvPeak);
+    if (document.getElementById('statBlockPeak-mobile')) document.getElementById('statBlockPeak-mobile').textContent = formatNumber(stats.blockPeak);
+    if (document.getElementById('statWAFCount-mobile')) document.getElementById('statWAFCount-mobile').textContent = wafInstances.length;
+
+    renderGeoDistribution();
+    renderGeoDistributionMobile();
+    renderGeoMapMobile();
+
+    renderQPSChart();
+    renderQPSChartMobile();
+    renderTrafficChart();
+    renderTrafficChartMobile();
+    renderAttackChart();
+    renderAttackChartMobile();
+    renderTrendChart();
+    renderTrendChartMobile();
+
+    if (clientStats && clientStats.platformStats) {
+        const platforms = clientStats.platformStats || [];
+        const browsers = clientStats.browserStats || [];
+        console.log('[DEBUG] renderClientStats platforms:', platforms, 'browsers:', browsers);
+        renderClientStats(platforms, browsers);
+    }
+}
+
+function renderClientStats(platforms, browsers) {
+    const clientStatsContainer = document.getElementById('clientStatsContainer');
+    if (clientStatsContainer) {
+        const maxItems = Math.max(platforms.length, browsers.length);
+        const rankColors = ['#FF6B6B', '#FFA726', '#FFD93D', '#6BCB77', '#4D96FF'];
+
+        let html = `
+        <div style="display: flex; gap: 20px; align-items: center; width: 100%; height: 100%;">
+            <div style="width: 150px; display: flex; justify-content: center;">
+                <canvas id="clientDonutChart" width="140" height="140"></canvas>
+            </div>
+            <div style="flex: 1; display: flex; gap: 15px;">
+                <div style="flex: 1;">
+        `;
+
+        for (let i = 0; i < maxItems; i++) {
+            if (platforms[i]) {
+                const p = platforms[i];
+                const rankColor = i < rankColors.length ? rankColors[i] : '#4D96FF';
+                html += `
+                <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <div style="width: 8px; height: 8px; border-radius: 50%; background: ${rankColor};"></div>
+                        <span style="color: var(--text-primary); font-size: 14px;">${p.name}</span>
+                    </div>
+                    <span style="color: #000; font-weight: 600; font-size: 14px;">${formatNumber(p.count)}</span>
+                </div>
+                `;
+            } else {
+                html += `<div style="padding: 6px 0;"></div>`;
+            }
+        }
+
+        html += `
+                </div>
+                <div style="flex: 1;">
+        `;
+
+        for (let i = 0; i < maxItems; i++) {
+            if (browsers[i]) {
+                const b = browsers[i];
+                const rankColor = i < rankColors.length ? rankColors[i] : '#4D96FF';
+                html += `
+                <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <div style="width: 8px; height: 8px; border-radius: 50%; background: ${rankColor};"></div>
+                        <span style="color: var(--text-primary); font-size: 14px;">${b.name}</span>
+                    </div>
+                    <span style="color: #000; font-weight: 600; font-size: 14px;">${formatNumber(b.count)}</span>
+                </div>
+                `;
+            } else {
+                html += `<div style="padding: 6px 0;"></div>`;
+            }
+        }
+
+        html += `
+                </div>
+            </div>
+        </div>
+        `;
+
+        clientStatsContainer.innerHTML = html;
+        drawNestedDonutChart('clientDonutChart', platforms, browsers, rankColors);
+    }
+
+    const clientStatsContainerMobile = document.getElementById('clientStatsContainer-mobile');
+    if (clientStatsContainerMobile) {
+        const maxItems = Math.max(platforms.length, browsers.length);
+        const rankColors = ['#FF6B6B', '#FFA726', '#FFD93D', '#6BCB77', '#4D96FF'];
+
+        let html = `
+            <div style="display: flex; justify-content: center; padding: 10px 0;">
+                <canvas id="clientDonutChart-mobile" width="160" height="160"></canvas>
+            </div>
+            <div style="display: flex; gap: 15px; padding: 10px; font-size: 12px;">
+                <div style="flex: 1;">
+        `;
+
+        for (let i = 0; i < maxItems; i++) {
+            if (platforms[i]) {
+                const p = platforms[i];
+                html += `
+                <div style="display: flex; justify-content: space-between; padding: 4px 0;">
+                    <span style="color: var(--text-primary);">${p.name}</span>
+                    <span style="color: #000; font-weight: 600;">${formatNumber(p.count)}</span>
+                </div>
+                `;
+            }
+        }
+
+        html += `
+                </div>
+                <div style="flex: 1;">
+        `;
+
+        for (let i = 0; i < maxItems; i++) {
+            if (browsers[i]) {
+                const b = browsers[i];
+                html += `
+                <div style="display: flex; justify-content: space-between; padding: 4px 0;">
+                    <span style="color: var(--text-primary);">${b.name}</span>
+                    <span style="color: #000; font-weight: 600;">${formatNumber(b.count)}</span>
+                </div>
+                `;
+            }
+        }
+
+        html += `
+                </div>
+            </div>
+        `;
+
+        clientStatsContainerMobile.innerHTML = html;
+        drawNestedDonutChart('clientDonutChart-mobile', platforms, browsers, rankColors);
+    }
+}
+
 function showDomainTooltip(event, tooltipId) {
     const tooltip = document.getElementById(tooltipId);
     if (!tooltip) return;
@@ -65,6 +385,7 @@ let statsData = {
     blockPeak: 0,
     geoDistribution: {}
 };
+let currentTrendData = null;
 let currentGeoTab = 'world';
 let currentActionTab = 'access';
 let historyData = {
@@ -85,40 +406,6 @@ let tooltipElement = null;
 let geoMapChartChina = null;
 let geoMapChartWorld = null;
 let qpsChart = null;
-
-let cachedChinaMapData = null;
-let cachedWorldMapData = null;
-let mapCachePromises = {};
-
-function loadMapData(mapType) {
-    if (mapCachePromises[mapType]) {
-        return mapCachePromises[mapType];
-    }
-
-    const mapFile = mapType === 'china' ? '/static/maps/china.json' : '/static/maps/world.json';
-    mapCachePromises[mapType] = fetch(mapFile)
-        .then(response => response.json())
-        .then(data => {
-            if (mapType === 'china') {
-                cachedChinaMapData = data;
-            } else {
-                cachedWorldMapData = data;
-            }
-            return data;
-        })
-        .catch(error => {
-            console.error(`加载${mapType === 'china' ? '中国' : '世界'}地图数据失败:`, error);
-            delete mapCachePromises[mapType];
-            return null;
-        });
-
-    return mapCachePromises[mapType];
-}
-
-function getCachedMapData(mapType) {
-    return mapType === 'china' ? cachedChinaMapData : cachedWorldMapData;
-}
-
 let currentUsername = '';
 let isLoggedIn = false;
 let currentLogsPage = 1;
@@ -126,187 +413,6 @@ let totalLogsPages = 1;
 let currentLogsPageSize = 20;
 let fullClientStats = null;
 let top5ClientStats = null;
-
-let wsConnection = null;
-let wsReconnectTimer = null;
-let wsEnabled = true;
-
-function initWebSocket() {
-    if (!wsEnabled) return;
-
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
-
-    try {
-        wsConnection = new WebSocket(wsUrl);
-
-        wsConnection.onopen = () => {
-            console.log('WebSocket连接已建立');
-            if (wsReconnectTimer) {
-                clearTimeout(wsReconnectTimer);
-                wsReconnectTimer = null;
-            }
-        };
-
-        wsConnection.onmessage = (event) => {
-            try {
-                const message = JSON.parse(event.data);
-                handleWebSocketMessage(message);
-            } catch (e) {
-                console.error('WebSocket消息解析失败:', e);
-            }
-        };
-
-        wsConnection.onerror = (error) => {
-            console.error('WebSocket错误:', error);
-        };
-
-        wsConnection.onclose = () => {
-            console.log('WebSocket连接已关闭');
-            wsConnection = null;
-            if (wsEnabled) {
-                wsReconnectTimer = setTimeout(() => {
-                    console.log('正在重新连接WebSocket...');
-                    initWebSocket();
-                }, 3000);
-            }
-        };
-    } catch (e) {
-        console.error('WebSocket连接失败:', e);
-        if (wsEnabled) {
-            wsReconnectTimer = setTimeout(() => {
-                initWebSocket();
-            }, 3000);
-        }
-    }
-}
-
-function handleWebSocketMessage(message) {
-    const { type, data } = message;
-
-    switch (type) {
-        case 'statistics':
-            updateStatsUI(data);
-            break;
-        case 'attack_log':
-            handleNewAttackLog(data);
-            break;
-        default:
-            console.log('未知WebSocket消息类型:', type);
-    }
-}
-
-function updateStatsUI(data) {
-    if (!data) return;
-
-    if (data.statistics) {
-        statsData = data.statistics;
-    }
-    if (data.trafficStats) {
-        if (!historyData.trafficStats) {
-            historyData.trafficStats = {};
-        }
-        historyData.trafficStats = data.trafficStats;
-    }
-    if (data.qpsHistory) {
-        historyData.qpsHistory = data.qpsHistory;
-    }
-    if (data.attackHistory) {
-        historyData.attackHistory = data.attackHistory;
-    }
-    if (data.trafficHistory) {
-        historyData.trafficHistory = data.trafficHistory;
-    }
-
-    document.getElementById('statRequestCount').textContent = formatNumber(statsData.requestCount);
-    document.getElementById('statPV').textContent = formatNumber(statsData.pv);
-    document.getElementById('statUV').textContent = formatNumber(statsData.uv);
-    document.getElementById('statUniqueIP').textContent = formatNumber(statsData.uniqueIP);
-
-    document.getElementById('statRequestCount-mobile')?.setAttribute('data-value', statsData.requestCount);
-    document.getElementById('statPV-mobile')?.setAttribute('data-value', statsData.pv);
-    document.getElementById('statUV-mobile')?.setAttribute('data-value', statsData.uv);
-    document.getElementById('statUniqueIP-mobile')?.setAttribute('data-value', statsData.uniqueIP);
-    if (document.getElementById('statRequestCount-mobile')) document.getElementById('statRequestCount-mobile').textContent = formatNumber(statsData.requestCount);
-    if (document.getElementById('statPV-mobile')) document.getElementById('statPV-mobile').textContent = formatNumber(statsData.pv);
-    if (document.getElementById('statUV-mobile')) document.getElementById('statUV-mobile').textContent = formatNumber(statsData.uv);
-    if (document.getElementById('statUniqueIP-mobile')) document.getElementById('statUniqueIP-mobile').textContent = formatNumber(statsData.uv);
-
-    document.getElementById('statBlockedCount').textContent = formatNumber(statsData.blockedCount);
-    document.getElementById('statAttackIP').textContent = formatNumber(statsData.attackIP);
-    document.getElementById('stat4xxBlocked').textContent = formatNumber(statsData.blockedCount);
-    document.getElementById('stat4xxBlockRate').textContent = statsData.fourXxBlockRate ? statsData.fourXxBlockRate.toFixed(2) + '%' : '0%';
-
-    if (document.getElementById('statBlockedCount-mobile')) document.getElementById('statBlockedCount-mobile').textContent = formatNumber(statsData.blockedCount);
-    if (document.getElementById('statAttackIP-mobile')) document.getElementById('statAttackIP-mobile').textContent = formatNumber(statsData.attackIP);
-    if (document.getElementById('stat4xxBlocked-mobile')) document.getElementById('stat4xxBlocked-mobile').textContent = formatNumber(statsData.blockedCount);
-    if (document.getElementById('stat4xxBlockRate-mobile')) document.getElementById('stat4xxBlockRate-mobile').textContent = statsData.fourXxBlockRate ? statsData.fourXxBlockRate.toFixed(2) + '%' : '0%';
-
-    document.getElementById('stat4xxError').textContent = formatNumber(statsData.fourXxError);
-    document.getElementById('stat4xxErrorRate').textContent = statsData.fourXxErrorRate ? statsData.fourXxErrorRate.toFixed(2) + '%' : '0%';
-    document.getElementById('stat5xxError').textContent = formatNumber(statsData.fiveXxError);
-    document.getElementById('stat5xxErrorRate').textContent = statsData.fiveXxErrorRate ? statsData.fiveXxErrorRate.toFixed(2) + '%' : '0%';
-
-    if (document.getElementById('stat4xxError-mobile')) document.getElementById('stat4xxError-mobile').textContent = formatNumber(statsData.fourXxError);
-    if (document.getElementById('stat4xxErrorRate-mobile')) document.getElementById('stat4xxErrorRate-mobile').textContent = statsData.fourXxErrorRate ? statsData.fourXxErrorRate.toFixed(2) + '%' : '0%';
-    if (document.getElementById('stat5xxError-mobile')) document.getElementById('stat5xxError-mobile').textContent = formatNumber(statsData.fiveXxError);
-    if (document.getElementById('stat5xxErrorRate-mobile')) document.getElementById('stat5xxErrorRate-mobile').textContent = statsData.fiveXxErrorRate ? statsData.fiveXxErrorRate.toFixed(2) + '%' : '0%';
-
-    document.getElementById('statAvgResponseTime').textContent = statsData.avgResponseTime > 0 ? statsData.avgResponseTime + 'ms' : '-';
-    if (document.getElementById('statAvgResponseTime-mobile')) document.getElementById('statAvgResponseTime-mobile').textContent = statsData.avgResponseTime > 0 ? statsData.avgResponseTime + 'ms' : '-';
-
-    const qpsBadgeValue = document.getElementById('qps-badge-value');
-    if (qpsBadgeValue) {
-        qpsBadgeValue.textContent = statsData.qps;
-    }
-    const qpsBadgeValueMobile = document.getElementById('qps-badge-value-mobile');
-    if (qpsBadgeValueMobile) {
-        qpsBadgeValueMobile.textContent = statsData.qps;
-    }
-
-    const attackBadgeValue = document.getElementById('attack-badge-value');
-    if (attackBadgeValue) {
-        const attackHistory = historyData.attackHistory || [];
-        const currentAttack = attackHistory.length > 0 ? attackHistory[attackHistory.length - 1].count : 0;
-        attackBadgeValue.textContent = currentAttack;
-    }
-    const attackBadgeValueMobile = document.getElementById('attack-badge-value-mobile');
-    if (attackBadgeValueMobile) {
-        const attackHistory = historyData.attackHistory || [];
-        const currentAttack = attackHistory.length > 0 ? attackHistory[attackHistory.length - 1].count : 0;
-        attackBadgeValueMobile.textContent = currentAttack;
-    }
-
-    document.getElementById('statPVPeak').textContent = formatNumber(statsData.pvPeak);
-    document.getElementById('statBlockPeak').textContent = formatNumber(statsData.blockPeak);
-    document.getElementById('statWAFCount').textContent = wafInstances.length;
-    if (document.getElementById('statPVPeak-mobile')) document.getElementById('statPVPeak-mobile').textContent = formatNumber(statsData.pvPeak);
-    if (document.getElementById('statBlockPeak-mobile')) document.getElementById('statBlockPeak-mobile').textContent = formatNumber(statsData.blockPeak);
-    if (document.getElementById('statWAFCount-mobile')) document.getElementById('statWAFCount-mobile').textContent = wafInstances.length;
-
-    renderGeoDistribution();
-    renderGeoDistributionMobile();
-    renderGeoMapMobile();
-}
-
-function handleNewAttackLog(log) {
-    const activeTab = document.querySelector('.tab-content.active');
-    if (activeTab && activeTab.id === 'logs-tab') {
-        loadLogs();
-    }
-
-    const recentAttacksContainer = document.getElementById('recentAttacks');
-    if (recentAttacksContainer && log) {
-        const attackTypeElem = recentAttacksContainer.querySelector(`[data-attack-type="${log.attackType}"]`);
-        if (attackTypeElem) {
-            const countElem = attackTypeElem.querySelector('.attack-count');
-            if (countElem) {
-                const currentCount = parseInt(countElem.textContent) || 0;
-                countElem.textContent = currentCount + 1;
-            }
-        }
-    }
-}
 
 async function loadCurrentUser() {
     try {
@@ -4885,119 +4991,134 @@ async function renderTrendChart() {
     const activeTab = document.querySelector('.trend-tab.active')?.dataset.tab || 'ip';
     const compareType = document.querySelector('input[name="compare"]:checked')?.value || 'prev-day';
 
-    try {
-        const response = await fetch(`/api/trend-data?compare=${compareType}`);
-        const result = await response.json();
-        
-        if (!result.success || !result.data) {
-            throw new Error('获取趋势数据失败');
+    let todayTrend = [];
+    let compareTrend = [];
+
+    if (compareType === 'prev-day' && currentTrendData) {
+        todayTrend = currentTrendData.todayTrend || [];
+        compareTrend = currentTrendData.compareTrend || [];
+    } else {
+        try {
+            const response = await fetch(`/api/trend-data?compare=${compareType}`);
+            const result = await response.json();
+
+            if (!result.success || !result.data) {
+                throw new Error('获取趋势数据失败');
+            }
+
+            todayTrend = result.data.todayTrend || [];
+            compareTrend = result.data.compareTrend || [];
+        } catch (error) {
+            console.error('获取趋势数据失败:', error);
+            if (currentTrendData) {
+                todayTrend = currentTrendData.todayTrend || [];
+                compareTrend = currentTrendData.compareTrend || [];
+            }
         }
+    }
 
-        if (!window.trendChart) {
-            window.trendChart = echarts.init(chartContainer);
-            window.addEventListener('resize', () => {
-                if (window.trendChart) {
-                    window.trendChart.resize();
-                }
-            });
-        } else {
-            window.trendChart.resize();
-        }
+    if (!window.trendChart) {
+        window.trendChart = echarts.init(chartContainer);
+        window.addEventListener('resize', () => {
+            if (window.trendChart) {
+                window.trendChart.resize();
+            }
+        });
+    } else {
+        window.trendChart.resize();
+    }
 
-        const todayTrend = result.data.todayTrend || [];
-        const compareTrend = result.data.compareTrend || [];
+    const hours = [];
+    const todayIPData = [];
+    const compareIPData = [];
+    const todayBlockData = [];
+    const todayObserveData = [];
+    const compareBlockData = [];
+    const compareObserveData = [];
 
-        const hours = [];
-        const todayIPData = [];
-        const compareIPData = [];
-        const todayBlockData = [];
-        const todayObserveData = [];
-        const compareBlockData = [];
-        const compareObserveData = [];
+    for (let i = 0; i < 24; i++) {
+        hours.push(`${i.toString().padStart(2, '0')}:00`);
 
-        for (let i = 0; i < 24; i++) {
-            hours.push(`${i.toString().padStart(2, '0')}:00`);
-            
-            const today = todayTrend[i] || { abnormal_ip_count: 0, block_count: 0, observe_count: 0 };
-            const compare = compareTrend[i] || { abnormal_ip_count: 0, block_count: 0, observe_count: 0 };
-            
-            todayIPData.push(today.abnormal_ip_count || 0);
-            compareIPData.push(compare.abnormal_ip_count || 0);
-            todayBlockData.push(today.block_count || 0);
-            todayObserveData.push(today.observe_count || 0);
-            compareBlockData.push(compare.block_count || 0);
-            compareObserveData.push(compare.observe_count || 0);
-        }
+        const today = todayTrend[i] || { abnormal_ip_count: 0, block_count: 0, observe_count: 0 };
+        const compare = compareTrend[i] || { abnormal_ip_count: 0, block_count: 0, observe_count: 0 };
 
-        const option = {
-            grid: {
-                left: '3%',
-                right: '4%',
-                bottom: '3%',
-                top: '10%',
-                containLabel: true
-            },
-            tooltip: {
-                trigger: 'axis',
-                axisPointer: {
-                    type: 'cross',
-                    crossStyle: {
-                        color: '#999'
-                    }
-                },
-                backgroundColor: 'rgba(255,255,255, 0.95)',
-                borderColor: '#e8eaed',
-                borderWidth: 1,
-                padding: [8, 12],
-                textStyle: {
-                    color: '#202124',
-                    fontSize: 12
+        todayIPData.push(today.abnormal_ip_count || 0);
+        compareIPData.push(compare.abnormal_ip_count || 0);
+        todayBlockData.push(today.block_count || 0);
+        todayObserveData.push(today.observe_count || 0);
+        compareBlockData.push(compare.block_count || 0);
+        compareObserveData.push(compare.observe_count || 0);
+    }
+
+    const option = {
+        grid: {
+            left: '3%',
+            right: '4%',
+            bottom: '3%',
+            top: '10%',
+            containLabel: true
+        },
+        tooltip: {
+            trigger: 'axis',
+            axisPointer: {
+                type: 'cross',
+                crossStyle: {
+                    color: '#999'
                 }
             },
-            legend: {
-                data: activeTab === 'ip' ? ['今日IP异常', compareType === 'prev-day' ? '前一日' : '上周同期'] : ['拦截', '观察', compareType === 'prev-day' ? '前一日拦截' : '上周同期拦截', compareType === 'prev-day' ? '前一日观察' : '上周同期观察'],
-                top: 0,
-                textStyle: {
-                    fontSize: 12,
-                    color: '#5f6368'
+            backgroundColor: 'rgba(255,255,255, 0.95)',
+            borderColor: '#e8eaed',
+            borderWidth: 1,
+            padding: [8, 12],
+            textStyle: {
+                color: '#202124',
+                fontSize: 12
+            }
+        },
+        legend: {
+            data: activeTab === 'ip' ? ['今日IP异常', compareType === 'prev-day' ? '前一日' : '上周同期'] : ['拦截', '观察', compareType === 'prev-day' ? '前一日拦截' : '上周同期拦截', compareType === 'prev-day' ? '前一日观察' : '上周同期观察'],
+            top: 0,
+            textStyle: {
+                fontSize: 12,
+                color: '#5f6368'
+            }
+        },
+        xAxis: {
+            type: 'category',
+            data: hours,
+            axisLine: {
+                lineStyle: {
+                    color: '#e0e0e0'
                 }
             },
-            xAxis: {
-                type: 'category',
-                data: hours,
-                axisLine: {
-                    lineStyle: {
-                        color: '#e0e0e0'
-                    }
-                },
-                axisLabel: {
-                    fontSize: 11,
-                    color: '#80868b',
-                    interval: 2
-                },
-                axisTick: {
-                    show: false
-                }
+            axisLabel: {
+                fontSize: 11,
+                color: '#80868b',
+                interval: 2
             },
-            yAxis: {
-                type: 'value',
-                axisLine: {
-                    show: false
-                },
-                axisTick: {
-                    show: false
-                },
-                axisLabel: {
-                    fontSize: 11,
-                    color: '#80868b'
-                },
-                splitLine: {
-                    lineStyle: {
-                        color: '#f1f3f4',
-                        type: 'dashed'
-                    }
-                }
+            axisTick: {
+                show: false
+            }
+        },
+        yAxis: {
+            type: 'value',
+            axisLine: {
+                show: false
             },
+            axisTick: {
+                show: false
+            },
+            axisLabel: {
+                fontSize: 11,
+                color: '#80868b'
+            },
+            splitLine: {
+                lineStyle: {
+                    color: '#f1f3f4',
+                    type: 'dashed'
+                }
+            }
+        },
             series: activeTab === 'ip' ? [
                 {
                     name: '今日IP异常',
@@ -5106,9 +5227,6 @@ async function renderTrendChart() {
         };
 
         window.trendChart.setOption(option, true);
-    } catch (error) {
-        console.error('加载趋势数据失败:', error);
-    }
 }
 
 function bindTrendEvents() {
@@ -5167,108 +5285,123 @@ async function renderTrendChartMobile() {
         chartContainer.style.opacity = '1';
     }
 
-    try {
-        const response = await fetch(`/api/trend-data?compare=${compareType}`);
-        const result = await response.json();
+    let todayTrend = [];
+    let compareTrend = [];
 
-        if (!result.success || !result.data) {
-            throw new Error('获取趋势数据失败');
+    if (compareType === 'prev-day' && currentTrendData) {
+        todayTrend = currentTrendData.todayTrend || [];
+        compareTrend = currentTrendData.compareTrend || [];
+    } else {
+        try {
+            const response = await fetch(`/api/trend-data?compare=${compareType}`);
+            const result = await response.json();
+
+            if (!result.success || !result.data) {
+                throw new Error('获取趋势数据失败');
+            }
+
+            todayTrend = result.data.todayTrend || [];
+            compareTrend = result.data.compareTrend || [];
+        } catch (error) {
+            console.error('获取趋势数据失败:', error);
+            if (currentTrendData) {
+                todayTrend = currentTrendData.todayTrend || [];
+                compareTrend = currentTrendData.compareTrend || [];
+            }
         }
+    }
 
-        const todayTrend = result.data.todayTrend || [];
-        const compareTrend = result.data.compareTrend || [];
+    const hours = [];
+    const todayIPData = [];
+    const compareIPData = [];
+    const todayBlockData = [];
+    const todayObserveData = [];
+    const compareBlockData = [];
+    const compareObserveData = [];
 
-        const hours = [];
-        const todayIPData = [];
-        const compareIPData = [];
-        const todayBlockData = [];
-        const todayObserveData = [];
-        const compareBlockData = [];
-        const compareObserveData = [];
+    for (let i = 0; i < 24; i++) {
+        hours.push(`${i.toString().padStart(2, '0')}:00`);
 
-        for (let i = 0; i < 24; i++) {
-            hours.push(`${i.toString().padStart(2, '0')}:00`);
+        const today = todayTrend[i] || { abnormal_ip_count: 0, block_count: 0, observe_count: 0 };
+        const compare = compareTrend[i] || { abnormal_ip_count: 0, block_count: 0, observe_count: 0 };
 
-            const today = todayTrend[i] || { abnormal_ip_count: 0, block_count: 0, observe_count: 0 };
-            const compare = compareTrend[i] || { abnormal_ip_count: 0, block_count: 0, observe_count: 0 };
+        todayIPData.push(today.abnormal_ip_count || 0);
+        compareIPData.push(compare.abnormal_ip_count || 0);
+        todayBlockData.push(today.block_count || 0);
+        todayObserveData.push(today.observe_count || 0);
+        compareBlockData.push(compare.block_count || 0);
+        compareObserveData.push(compare.observe_count || 0);
+    }
 
-            todayIPData.push(today.abnormal_ip_count || 0);
-            compareIPData.push(compare.abnormal_ip_count || 0);
-            todayBlockData.push(today.block_count || 0);
-            todayObserveData.push(today.observe_count || 0);
-            compareBlockData.push(compare.block_count || 0);
-            compareObserveData.push(compare.observe_count || 0);
-        }
-
-        const option = {
-            grid: {
-                left: '3%',
-                right: '4%',
-                bottom: '3%',
-                top: '10%',
-                containLabel: true
-            },
-            tooltip: {
-                trigger: 'axis',
-                axisPointer: {
-                    type: 'cross',
-                    crossStyle: {
-                        color: '#999'
-                    }
-                },
-                backgroundColor: 'rgba(255,255,255, 0.95)',
-                borderColor: '#e8eaed',
-                borderWidth: 1,
-                padding: [8, 12],
-                textStyle: {
-                    color: '#202124',
-                    fontSize: 12
+    const option = {
+        grid: {
+            left: '3%',
+            right: '4%',
+            bottom: '3%',
+            top: '10%',
+            containLabel: true
+        },
+        tooltip: {
+            trigger: 'axis',
+            axisPointer: {
+                type: 'cross',
+                crossStyle: {
+                    color: '#999'
                 }
             },
-            legend: {
-                data: activeTab === 'ip' ? ['今日IP异常', compareType === 'prev-day' ? '前一日' : '上周同期'] : ['拦截', '观察', compareType === 'prev-day' ? '前一日拦截' : '上周同期拦截'],
-                top: 0,
-                textStyle: {
-                    fontSize: 10,
-                    color: '#5f6368'
+            backgroundColor: 'rgba(255,255,255, 0.95)',
+            borderColor: '#e8eaed',
+            borderWidth: 1,
+            padding: [8, 12],
+            textStyle: {
+                color: '#202124',
+                fontSize: 12
+            }
+        },
+        legend: {
+            data: activeTab === 'ip' ? ['今日IP异常', compareType === 'prev-day' ? '前一日' : '上周同期'] : ['拦截', '观察', compareType === 'prev-day' ? '前一日拦截' : '上周同期拦截'],
+            top: 0,
+            textStyle: {
+                fontSize: 10,
+                color: '#5f6368'
+            }
+        },
+        xAxis: {
+            type: 'category',
+            data: hours,
+            axisLine: {
+                lineStyle: {
+                    color: '#e0e0e0'
                 }
             },
-            xAxis: {
-                type: 'category',
-                data: hours,
-                axisLine: {
-                    lineStyle: {
-                        color: '#e0e0e0'
-                    }
-                },
-                axisLabel: {
-                    fontSize: 10,
-                    color: '#80868b',
-                    interval: 5
-                },
-                axisTick: {
-                    show: false
-                }
+            axisLabel: {
+                fontSize: 10,
+                color: '#80868b',
+                interval: 5
             },
-            yAxis: {
-                type: 'value',
-                axisLine: {
-                    show: false
-                },
-                axisTick: {
-                    show: false
-                },
-                axisLabel: {
-                    fontSize: 10,
-                    color: '#80868b'
-                },
-                splitLine: {
-                    lineStyle: {
-                        color: '#f1f3f4',
-                        type: 'dashed'
-                    }
-                }
+            axisTick: {
+                show: false
+            }
+        },
+        yAxis: {
+            type: 'value',
+            axisLine: {
+                show: false
             },
+            axisTick: {
+                show: false
+            },
+            axisLabel: {
+                fontSize: 10,
+                color: '#80868b'
+            },
+            splitLine: {
+                lineStyle: {
+                    color: '#f1f3f4',
+                    type: 'dashed'
+                }
+            }
+        },
             series: activeTab === 'ip' ? [
                 {
                     name: '今日IP异常',
@@ -5377,9 +5510,6 @@ async function renderTrendChartMobile() {
         };
 
         window.trendChartMobile.setOption(option, true);
-    } catch (error) {
-        console.error('加载趋势数据失败:', error);
-    }
 }
 
 function renderGeoDistribution() {
@@ -6231,7 +6361,7 @@ function renderGeoMap(geoData) {
                 }
             ]
         };
-        
+
         loadMapData('china').then(chinaJson => {
             if (chinaJson) {
                 echarts.registerMap('china', chinaJson);
@@ -6317,7 +6447,7 @@ function renderGeoMap(geoData) {
                 }
             ]
         };
-        
+
         loadMapData('world').then(worldJson => {
             if (worldJson) {
                 echarts.registerMap('world', worldJson);
@@ -6914,9 +7044,8 @@ function formatNumber(num) {
 document.addEventListener('DOMContentLoaded', async () => {
     const prevDayRadio = document.querySelector('input[name="compare"][value="prev-day"]');
     if (prevDayRadio) prevDayRadio.checked = true;
-
+    
     loadCurrentUser();
-    initWebSocket();
     loadSystemSettings();
     loadAvailableRules();
     await loadWAFInstances();
@@ -6946,6 +7075,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (window.geoMapChartWorldMobile) window.geoMapChartWorldMobile.resize();
         if (window.geoMapChartChinaMobile) window.geoMapChartChinaMobile.resize();
     });
+
+    initWebSocket();
 
     setInterval(() => {
         const activeTab = document.querySelector('.tab-content.active');
