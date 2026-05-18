@@ -54,8 +54,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.13"
-const localVersionInt = 40131 // 版本整数值，用于对比
+const frontendVersion = "v0.4.14"
+const localVersionInt = 40141 // 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
@@ -4265,23 +4265,6 @@ func handleAbout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	remoteContent := ""
-	aboutURL := convertToMirrorURL("https://raw.githubusercontent.com/fgh1995/CorazaWafProxy/main/about.html")
-	resp, err = client.Get(aboutURL)
-	if err == nil {
-		defer resp.Body.Close()
-		content, err := io.ReadAll(resp.Body)
-		if err == nil {
-			remoteContent = string(content)
-			startIdx := strings.Index(remoteContent, "<body>")
-			endIdx := strings.Index(remoteContent, "</body>")
-			if startIdx != -1 && endIdx != -1 {
-				remoteContent = remoteContent[startIdx+6 : endIdx]
-			}
-			remoteContent = strings.TrimSpace(remoteContent)
-		}
-	}
-
 	result := string(localTemplate)
 	result = strings.ReplaceAll(result, "{localversion}", frontendVersion)
 	result = strings.ReplaceAll(result, "{remoteversion}", remoteVersionTxt)
@@ -4290,7 +4273,6 @@ func handleAbout(w http.ResponseWriter, r *http.Request) {
 	result = strings.ReplaceAll(result, "{downloadurl}", downloadURL)
 	result = strings.ReplaceAll(result, "{downloadplatform}", downloadPlatform)
 	result = strings.ReplaceAll(result, "{releasenotes}", releaseNotes)
-	result = strings.ReplaceAll(result, "{remotecontent}", remoteContent)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)

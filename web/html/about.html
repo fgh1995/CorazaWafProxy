@@ -252,10 +252,6 @@
     </h1>
     <div class="subhead">基于 Coraza WAF 的反向代理防火墙，支持攻击检测、地理IP封锁和实时攻击日志。</div>
 
-    <div id="remoteContentArea">
-        {remotecontent}
-    </div>
-
     <div id="updateNotificationArea" class="update-card" style="display: none;"></div>
 
     <div id="autoUpdateStatus" style="margin-top: 8px; font-size: 0.85rem; text-align: center;"></div>
@@ -297,7 +293,6 @@
     var DOWNLOAD_URL = "{downloadurl}";
     var DOWNLOAD_PLATFORM = "{downloadplatform}";
     var RELEASE_NOTES = "{releasenotes}";
-    var REMOTE_CONTENT = "";
 
     function isNewVersionAvailable() {
         if (typeof HAS_NEW_VERSION === 'boolean') {
@@ -469,11 +464,6 @@
                     </button>
                 `;
             }
-        }
-
-        const remoteContentArea = document.getElementById('remoteContentArea');
-        if (remoteContentArea && REMOTE_CONTENT) {
-            remoteContentArea.innerHTML = REMOTE_CONTENT;
         }
     }
 
