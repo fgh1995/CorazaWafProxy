@@ -55,7 +55,7 @@ import (
 )
 
 const frontendVersion = "v0.4.16"
-const localVersionInt = 40160 // 版本整数值，用于对比
+const localVersionInt = 40161 // 版本整数值，用于对比
 const ReleaseNotes = "" // 更新日志
 
 var db *sql.DB
@@ -4238,7 +4238,7 @@ func handleAbout(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[About] 开始检查版本，localVersionInt=%d, frontendVersion=%s", localVersionInt, frontendVersion)
 
-	versionURL := convertToMirrorURL("https://raw.githubusercontent.com/fgh1995/CorazaWafProxy/main/main.go")
+	versionURL := convertToMirrorURL("https://raw.githubusercontent.com/fgh1995/CorazaWafProxy/refs/heads/main/main.go")
 	log.Printf("[About] 请求URL: %s", versionURL)
 
 	resp, err := client.Get(versionURL)
@@ -4384,7 +4384,7 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[版本检查] 开始检查版本，localVersionInt=%d", localVersionInt)
 
-	versionURL := convertToMirrorURL("https://raw.githubusercontent.com/fgh1995/CorazaWafProxy/main/main.go")
+	versionURL := convertToMirrorURL("https://raw.githubusercontent.com/fgh1995/CorazaWafProxy/refs/heads/main/main.go")
 	resp, err := client.Get(versionURL)
 	if err != nil {
 		log.Printf("[版本检查] 获取远程版本失败: %v", err)
