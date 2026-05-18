@@ -79,7 +79,7 @@ jobs:
       - name: Create SHA256 checksums
         run: |
           cd release
-          sha256sum *.exe *.tar.gz > SHA256SUMS.txt
+          sha256sum *.zip *.tar.gz > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Create GitHub Release
