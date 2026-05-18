@@ -54,8 +54,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.10"
-const localVersionInt = 41000 // 版本整数值，用于对比
+const frontendVersion = "v0.4.11"
+const localVersionInt = 40110 // 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
@@ -4515,14 +4515,24 @@ func handleManualUpdate(w http.ResponseWriter, r *http.Request) {
 
 	file.Seek(0, 0)
 
-	extractDir := filepath.Dir(currentExec)
-	log.Printf("[手动更新] 提取更新文件到: %s", extractDir)
+	execDir := filepath.Dir(currentExec)
+	tmpDir, err := ioutil.TempDir("", "coraza-update-*")
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ManualUpdateResult{
+			Success:  false,
+			Message:  "创建临时目录失败: " + err.Error(),
+		})
+		return
+	}
+	defer os.RemoveAll(tmpDir)
 
 	var extractedExecPath string
 	if isZip {
-		extractedExecPath, err = extractZip(file, header.Size, extractDir, expectedExecName)
+		extractedExecPath, err = extractZip(file, header.Size, tmpDir, expectedExecName)
 	} else {
-		extractedExecPath, err = extractTarGz(file, extractDir, expectedExecName)
+		extractedExecPath, err = extractTarGz(file, tmpDir, expectedExecName)
 	}
 
 	if err != nil {
@@ -4535,15 +4545,285 @@ func handleManualUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[手动更新] 程序已更新: %s -> %s", extractedExecPath, currentExec)
+	newExecPath := extractedExecPath
+	updatingExecPath := currentExec + ".updating"
+
+	if err := os.Rename(currentExec, updatingExecPath); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ManualUpdateResult{
+			Success:  false,
+			Message:  "准备更新文件失败: " + err.Error(),
+		})
+		return
+	}
+
+	if err := os.Rename(newExecPath, currentExec); err != nil {
+		os.Rename(updatingExecPath, currentExec)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ManualUpdateResult{
+			Success:  false,
+			Message:  "替换程序失败: " + err.Error(),
+		})
+		return
+	}
+
+	os.Chmod(currentExec, 0755)
+
+	updateScriptPath := filepath.Join(execDir, "update-helper.bat")
+	var scriptContent string
+	if currentGOOS == "windows" {
+		scriptContent = fmt.Sprintf(`@echo off
+:wait
+ping -n 2 127.0.0.1 >nul
+if exist "%s" goto wait
+del "%s" 2>nul
+del "%s" 2>nul
+del "%%~f0" 2>nul
+`, currentExec, updatingExecPath, updateScriptPath)
+		if err := ioutil.WriteFile(updateScriptPath, []byte(scriptContent), 0755); err != nil {
+			log.Printf("[手动更新] 创建更新脚本失败: %v", err)
+		}
+	} else {
+		scriptContent = fmt.Sprintf(`#!/bin/bash
+while [ -f "%s" ]; do
+    sleep 0.5
+done
+rm -f "%s"
+rm -f "%s"
+rm -f "$0"
+`, currentExec, updatingExecPath, updateScriptPath)
+		scriptPath := filepath.Join(execDir, "update-helper.sh")
+		if err := ioutil.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			log.Printf("[手动更新] 创建更新脚本失败: %v", err)
+		}
+		goexec := "/bin/bash"
+		exec.Command(goexec, scriptPath).Start()
+	}
+
+	log.Printf("[手动更新] 程序已就绪: %s -> %s", updatingExecPath, currentExec)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(ManualUpdateResult{
 		Success:      true,
-		Message:      "更新成功！程序及资源文件已更新（data目录已保留）",
+		Message:      "更新已准备就绪！旧程序将在服务重启后自动清理。请手动重启服务。",
 		NeedsRestart: true,
 	})
+}
+
+func handleAutoUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req UpdateDownloadRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(AutoUpdateResult{
+			Success: false,
+			Message: "无效的请求: " + err.Error(),
+		})
+		return
+	}
+
+	downloadURL := req.DownloadURL
+	platform := req.Platform
+
+	if downloadURL == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(AutoUpdateResult{
+			Success: false,
+			Message: "下载链接不能为空",
+		})
+		return
+	}
+
+	log.Printf("[自动更新] 开始从 %s 下载更新包: %s", platform, downloadURL)
+
+	client := &http.Client{
+		Timeout: 300 * time.Second,
+	}
+
+	resp, err := client.Get(downloadURL)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(AutoUpdateResult{
+			Success: false,
+			Message: "下载更新包失败: " + err.Error(),
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(AutoUpdateResult{
+			Success: false,
+			Message: fmt.Sprintf("下载失败，HTTP状态码: %d", resp.StatusCode),
+		})
+		return
+	}
+
+	currentGOOS := runtime.GOOS
+	currentGOARCH := runtime.GOARCH
+	currentExec, err := os.Executable()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(AutoUpdateResult{
+			Success: false,
+			Message: "无法获取当前程序路径: " + err.Error(),
+		})
+		return
+	}
+
+	tmpDir, err := ioutil.TempDir("", "coraza-autoupdate-*")
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(AutoUpdateResult{
+			Success: false,
+			Message: "创建临时目录失败: " + err.Error(),
+		})
+		return
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tmpFile := filepath.Join(tmpDir, "update-package")
+	outFile, err := os.Create(tmpFile)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(AutoUpdateResult{
+			Success: false,
+			Message: "创建临时文件失败: " + err.Error(),
+		})
+		return
+	}
+
+	_, err = io.Copy(outFile, resp.Body)
+	outFile.Close()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(AutoUpdateResult{
+			Success: false,
+			Message: "保存更新包失败: " + err.Error(),
+		})
+		return
+	}
+
+	updateFile, err := os.Open(tmpFile)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(AutoUpdateResult{
+			Success: false,
+			Message: "打开更新包失败: " + err.Error(),
+		})
+		return
+	}
+	defer updateFile.Close()
+
+	fileInfo, _ := updateFile.Stat()
+	fileSize := fileInfo.Size()
+
+	expectedExecName := getExpectedExecName(currentGOOS, currentGOARCH)
+	var extractedExecPath string
+
+	if strings.HasSuffix(downloadURL, ".zip") {
+		extractedExecPath, err = extractZip(updateFile, fileSize, tmpDir, expectedExecName)
+	} else {
+		extractedExecPath, err = extractTarGz(updateFile, tmpDir, expectedExecName)
+	}
+
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(AutoUpdateResult{
+			Success: false,
+			Message: "解压更新包失败: " + err.Error(),
+		})
+		return
+	}
+
+	execDir := filepath.Dir(currentExec)
+	updatingExecPath := currentExec + ".updating"
+
+	if err := os.Rename(currentExec, updatingExecPath); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(AutoUpdateResult{
+			Success: false,
+			Message: "准备更新文件失败: " + err.Error(),
+		})
+		return
+	}
+
+	if err := os.Rename(extractedExecPath, currentExec); err != nil {
+		os.Rename(updatingExecPath, currentExec)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(AutoUpdateResult{
+			Success: false,
+			Message: "替换程序失败: " + err.Error(),
+		})
+		return
+	}
+
+	os.Chmod(currentExec, 0755)
+
+	if currentGOOS == "windows" {
+		scriptContent := fmt.Sprintf(`@echo off
+:wait
+ping -n 2 127.0.0.1 >nul
+if exist "%s" goto wait
+del "%s" 2>nul
+del "%%~f0" 2>nul
+`, currentExec, updatingExecPath)
+		scriptPath := filepath.Join(execDir, "update-helper.bat")
+		ioutil.WriteFile(scriptPath, []byte(scriptContent), 0755)
+	} else {
+		scriptContent := fmt.Sprintf(`#!/bin/bash
+while [ -f "%s" ]; do
+    sleep 0.5
+done
+rm -f "%s"
+rm -f "$0"
+`, currentExec, updatingExecPath)
+		scriptPath := filepath.Join(execDir, "update-helper.sh")
+		ioutil.WriteFile(scriptPath, []byte(scriptContent), 0755)
+		goexec := "/bin/bash"
+		exec.Command(goexec, scriptPath).Start()
+	}
+
+	log.Printf("[自动更新] 程序已就绪: %s -> %s", updatingExecPath, currentExec)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(AutoUpdateResult{
+		Success:      true,
+		Message:      "更新已准备就绪！旧程序将在服务重启后自动清理。请手动重启服务。",
+		NeedsRestart: true,
+	})
+}
+
+type AutoUpdateResult struct {
+	Success      bool   `json:"success"`
+	Message     string `json:"message"`
+	NeedsRestart bool   `json:"needsRestart"`
+}
+
+type UpdateDownloadRequest struct {
+	DownloadURL string `json:"downloadUrl"`
+	Platform    string `json:"platform"`
 }
 
 func getExpectedExecName(goos, goarch string) string {
@@ -9413,6 +9693,7 @@ func main() {
 	mux.HandleFunc("/api/check-update", handleCheckUpdate)
 	mux.HandleFunc("/api/system-info", handleSystemInfo)
 	mux.HandleFunc("/api/manual-update", handleManualUpdate)
+	mux.HandleFunc("/api/auto-update", handleAutoUpdate)
 	mux.HandleFunc("/api/db-version", handleDBVersion)
 	mux.HandleFunc("/api/db-upgrade", readOnlyMiddleware(handleDBUpgrade))
 	mux.HandleFunc("/api/db-upgrade-progress", handleDBUpgradeProgress)

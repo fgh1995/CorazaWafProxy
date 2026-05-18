@@ -238,6 +238,8 @@
 
     <div id="updateNotificationArea" class="update-card" style="display: none;"></div>
 
+    <div id="autoUpdateStatus" style="margin-top: 8px; font-size: 0.85rem; text-align: center;"></div>
+
     <div class="update-card" id="manualUpdateCard" style="margin-top: 16px;">
         <h3 style="margin: 0 0 12px 0; color: #1f3a64;">🔧 手动更新</h3>
         <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
@@ -305,19 +307,83 @@
         });
     }
 
+    function performAutoUpdate() {
+        const platform = DOWNLOAD_PLATFORM || '未知';
+        const version = REMOTE_VERSION || '最新版本';
+        const downloadUrl = DOWNLOAD_URL || '';
+
+        if (!downloadUrl) {
+            alert('下载链接无效');
+            return;
+        }
+
+        const confirmed = confirm(
+            `即将自动下载并安装版本 ${version}！\n\n` +
+            `下载平台: ${platform}\n\n` +
+            `更新后需要重启服务生效。\n` +
+            `是否继续？`
+        );
+
+        if (!confirmed) return;
+
+        const statusEl = document.getElementById('updateStatus') || document.getElementById('autoUpdateStatus');
+        if (statusEl) {
+            statusEl.textContent = '正在下载并更新...';
+            statusEl.style.color = '#2563eb';
+        }
+
+        fetch('/api/auto-update', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                downloadUrl: downloadUrl,
+                platform: platform
+            })
+        })
+        .then(function(response) { return response.json(); })
+        .then(function(data) {
+            if (data.success) {
+                if (statusEl) {
+                    statusEl.textContent = '✅ ' + data.message;
+                    statusEl.style.color = '#059669';
+                }
+                alert('更新成功！请手动重启服务以使用新版本。');
+            } else {
+                if (statusEl) {
+                    statusEl.textContent = '❌ ' + data.message;
+                    statusEl.style.color = '#dc2626';
+                }
+            }
+        })
+        .catch(function(err) {
+            if (statusEl) {
+                statusEl.textContent = '❌ 更新失败: ' + err.message;
+                statusEl.style.color = '#dc2626';
+            }
+            console.error('Auto update failed:', err);
+        });
+    }
+
     function showUpdateConfirmation() {
         const platform = DOWNLOAD_PLATFORM || '未知';
         const version = REMOTE_VERSION || '最新版本';
         const downloadUrl = DOWNLOAD_URL || '';
 
-        const confirmed = confirm(
+        const choice = prompt(
             `发现新版本 ${version}！\n\n` +
             `下载平台: ${platform}\n\n` +
-            `是否前往下载页面？\n\n` +
-            `提示: 下载前请备份好当前配置。`
+            `请选择操作：\n\n` +
+            `1. 自动更新（推荐）\n` +
+            `2. 手动下载\n` +
+            `3. 取消\n\n` +
+            `请输入数字 (1/2/3)：`
         );
 
-        if (confirmed && downloadUrl) {
+        if (choice === '1') {
+            performAutoUpdate();
+        } else if (choice === '2' && downloadUrl) {
             window.open(downloadUrl, '_blank');
         }
     }
@@ -366,8 +432,11 @@
                             ${notes ? '<br><small>' + escapeHtml(notes) + '</small>' : ''}
                         </span>
                     </div>
+                    <button class="update-link" onclick="performAutoUpdate()" style="background: #059669;">
+                        ⚡ 自动更新
+                    </button>
                     <button class="update-link" onclick="showUpdateConfirmation()">
-                        📥 前往下载
+                        📥 手动下载
                     </button>
                 `;
             }
