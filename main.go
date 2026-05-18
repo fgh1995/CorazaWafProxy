@@ -54,8 +54,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.14"
-const localVersionInt = 40141 // 版本整数值，用于对比
+const frontendVersion = "v0.4.15"
+const localVersionInt = 40151 // 版本整数值，用于对比
+const ReleaseNotes = "" // 更新日志
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
@@ -253,9 +254,7 @@ func (c *WSClient) handleStatsRequest() {
 	blockedCountryStats := make(map[string]int)
 	blockedProvinceStats := make(map[string]int)
 
-	q1Start := time.Now()
 	rows, err := db.Query("SELECT ip, country, province, action FROM attack_logs LIMIT 500")
-	log.Printf("[DEBUG] attack_logs查询时间: %v", time.Since(q1Start))
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -297,9 +296,7 @@ func (c *WSClient) handleStatsRequest() {
 		}
 	}
 
-	q2Start := time.Now()
 	ipAccessRows, err := db.Query("SELECT ip, country, province, mode, action, result FROM ip_access_logs WHERE result != 'pass' LIMIT 500")
-	log.Printf("[DEBUG] ip_access_logs查询时间: %v", time.Since(q2Start))
 	if err == nil {
 		defer ipAccessRows.Close()
 		for ipAccessRows.Next() {
@@ -415,7 +412,6 @@ func (c *WSClient) handleStatsRequest() {
 	platformStats := make(map[string]int)
 	browserStats := make(map[string]int)
 
-	q3Start := time.Now()
 	platformRows, err := db.Query(`
 		SELECT platform, browser, COUNT(*) as cnt
 		FROM attack_logs
@@ -425,7 +421,6 @@ func (c *WSClient) handleStatsRequest() {
 		ORDER BY cnt DESC
 		LIMIT 500
 	`)
-	log.Printf("[DEBUG] platform/browser查询时间: %v", time.Since(q3Start))
 	if err == nil {
 		defer platformRows.Close()
 		for platformRows.Next() {
@@ -436,8 +431,6 @@ func (c *WSClient) handleStatsRequest() {
 			browserStats[browser] += cnt
 		}
 	}
-	log.Printf("[DEBUG] platformStats: %v", platformStats)
-	log.Printf("[DEBUG] browserStats: %v", browserStats)
 
 	type TopStatsItem struct {
 		Name  string `json:"name"`
@@ -470,8 +463,6 @@ func (c *WSClient) handleStatsRequest() {
 		"platformStats": platformList,
 		"browserStats":  browserList,
 	}
-	log.Printf("[DEBUG] clientStatsData: platformStats=%v, browserStats=%v", platformList, browserList)
-
 	latestAttackLogs := func() []map[string]interface{} {
 		rows, err := db.Query("SELECT id, action, url, attack_type, ip, time, country, province FROM attack_logs WHERE action != 'normal' ORDER BY time DESC LIMIT 50")
 		if err != nil {
@@ -892,11 +883,8 @@ func refreshTrendCache() {
 
 	date := time.Now().Format("2006-01-02")
 	compareDate := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-
-	log.Printf("[DEBUG] refreshTrendCache: 更新趋势数据")
 	cachedTodayTrend = queryHourlyTrend(date)
 	cachedYesterdayTrend = queryHourlyTrend(compareDate)
-	log.Printf("[DEBUG] refreshTrendCache: 完成")
 }
 
 const currentDBVersion = "1.6"
@@ -4246,22 +4234,48 @@ func handleAbout(w http.ResponseWriter, r *http.Request) {
 	var downloadPlatform string
 	var releaseNotes string
 	var remoteVersionTxt string
+	var remoteVersionInt int
 
-	apiURL := convertToMirrorURL("https://api.github.com/repos/fgh1995/CorazaWafProxy/releases/latest")
-	resp, err := client.Get(apiURL)
-	if err == nil && resp.StatusCode == 200 {
+	log.Printf("[About] 开始检查版本，localVersionInt=%d, frontendVersion=%s", localVersionInt, frontendVersion)
+
+	versionURL := convertToMirrorURL("https://raw.githubusercontent.com/fgh1995/CorazaWafProxy/main/main.go")
+	log.Printf("[About] 请求URL: %s", versionURL)
+
+	resp, err := client.Get(versionURL)
+	if err != nil {
+		log.Printf("[About] 获取远程版本失败: %v", err)
+	} else if resp.StatusCode != 200 {
+		log.Printf("[About] 获取远程版本返回状态码: %d", resp.StatusCode)
+	} else {
 		defer resp.Body.Close()
-		var release GithubRelease
-		if err := json.NewDecoder(resp.Body).Decode(&release); err == nil {
-			remoteVersionInt, _ := parseVersionFromTag(release.TagName)
-			remoteVersionTxt = release.TagName
-			releaseNotes = release.Body
-			downloadPlatform = "GitHub"
-			downloadURL = getDownloadURL(release.TagName)
+		versionContent, _ := io.ReadAll(resp.Body)
+		contentStr := string(versionContent)
 
-			if remoteVersionInt > localVersionInt {
-				hasNewVersion = true
-			}
+		intMatch := regexp.MustCompile(`localVersionInt\s*=\s*(\d+)`).FindStringSubmatch(contentStr)
+		if len(intMatch) == 2 {
+			fmt.Sscanf(intMatch[1], "%d", &remoteVersionInt)
+		}
+
+		txtMatch := regexp.MustCompile(`frontendVersion\s*=\s*"([^"]+)"`).FindStringSubmatch(contentStr)
+		if len(txtMatch) == 2 {
+			remoteVersionTxt = txtMatch[1]
+		}
+
+		releaseNotesMatch := regexp.MustCompile(`(?s)ReleaseNotes\s*=\s*"([^"]+)"`).FindStringSubmatch(contentStr)
+		if len(releaseNotesMatch) > 1 {
+			releaseNotes = releaseNotesMatch[1]
+		}
+
+		downloadURL = getDownloadURL(remoteVersionTxt)
+		downloadPlatform = "GitHub"
+
+		log.Printf("[About] 远程版本: text=%s, int=%d, releaseNotes长度=%d", remoteVersionTxt, remoteVersionInt, len(releaseNotes))
+
+		if remoteVersionInt > localVersionInt {
+			hasNewVersion = true
+			log.Printf("[About] 发现新版本: %d > %d", remoteVersionInt, localVersionInt)
+		} else {
+			log.Printf("[About] 当前已是最新版本: %d <= %d", remoteVersionInt, localVersionInt)
 		}
 	}
 
@@ -4368,10 +4382,12 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 		LocalVersion: frontendVersion,
 	}
 
-	apiURL := convertToMirrorURL("https://api.github.com/repos/fgh1995/CorazaWafProxy/releases/latest")
-	resp, err := client.Get(apiURL)
+	log.Printf("[版本检查] 开始检查版本，localVersionInt=%d", localVersionInt)
+
+	versionURL := convertToMirrorURL("https://raw.githubusercontent.com/fgh1995/CorazaWafProxy/main/main.go")
+	resp, err := client.Get(versionURL)
 	if err != nil {
-		log.Printf("[版本检查] 获取GitHub releases失败: %v", err)
+		log.Printf("[版本检查] 获取远程版本失败: %v", err)
 		result.HasNewVersion = false
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -4381,7 +4397,7 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		log.Printf("[版本检查] GitHub API返回状态码: %d", resp.StatusCode)
+		log.Printf("[版本检查] 获取远程版本返回状态码: %d", resp.StatusCode)
 		result.HasNewVersion = false
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -4389,27 +4405,37 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var release GithubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		log.Printf("[版本检查] 解析release JSON失败: %v", err)
-		result.HasNewVersion = false
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(result)
-		return
+	versionContent, _ := io.ReadAll(resp.Body)
+	contentStr := string(versionContent)
+
+	var remoteVersionInt int
+	intMatch := regexp.MustCompile(`localVersionInt\s*=\s*(\d+)`).FindStringSubmatch(contentStr)
+	if len(intMatch) == 2 {
+		fmt.Sscanf(intMatch[1], "%d", &remoteVersionInt)
 	}
 
-	remoteVersionInt, remoteVersionTxt := parseVersionFromTag(release.TagName)
-	result.RemoteVersion = remoteVersionTxt
+	txtMatch := regexp.MustCompile(`frontendVersion\s*=\s*"([^"]+)"`).FindStringSubmatch(contentStr)
+	if len(txtMatch) == 2 {
+		result.RemoteVersion = txtMatch[1]
+	}
+
+	releaseNotesMatch := regexp.MustCompile(`(?s)ReleaseNotes\s*=\s*"([^"]+)"`).FindStringSubmatch(contentStr)
+	if len(releaseNotesMatch) > 1 {
+		result.ReleaseNotes = releaseNotesMatch[1]
+	}
+
 	result.RemoteVersionInt = remoteVersionInt
-	result.ReleaseNotes = release.Body
 	result.DownloadPlatform = "GitHub"
-	result.DownloadURL = getDownloadURL(release.TagName)
+	result.DownloadURL = getDownloadURL(result.RemoteVersion)
+
+	log.Printf("[版本检查] 远程版本: text=%s, int=%d", result.RemoteVersion, remoteVersionInt)
 
 	if remoteVersionInt > localVersionInt {
 		result.HasNewVersion = true
+		log.Printf("[版本检查] 发现新版本: %d > %d", remoteVersionInt, localVersionInt)
 	} else {
 		result.HasNewVersion = false
+		log.Printf("[版本检查] 当前已是最新版本: %d <= %d", remoteVersionInt, localVersionInt)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

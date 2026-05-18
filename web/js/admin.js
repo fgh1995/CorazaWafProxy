@@ -208,7 +208,6 @@ function updateStatsUI(stats, history, clientStats) {
     if (clientStats && clientStats.platformStats) {
         const platforms = clientStats.platformStats || [];
         const browsers = clientStats.browserStats || [];
-        console.log('[DEBUG] renderClientStats platforms:', platforms, 'browsers:', browsers);
         renderClientStats(platforms, browsers);
     }
 }
