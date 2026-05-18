@@ -54,8 +54,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.15"
-const localVersionInt = 40151 // 版本整数值，用于对比
+const frontendVersion = "v0.4.16"
+const localVersionInt = 40160 // 版本整数值，用于对比
 const ReleaseNotes = "" // 更新日志
 
 var db *sql.DB
