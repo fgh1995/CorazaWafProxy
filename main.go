@@ -1,8 +1,11 @@
 package main
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -21,6 +24,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -28,7 +32,9 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,8 +54,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.9"
-const localVersionInt = 4090 // 版本整数值，用于对比
+const frontendVersion = "v0.4.10"
+const localVersionInt = 41000 // 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
@@ -4204,65 +4210,572 @@ func handleAbout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	localTemplate, err := ioutil.ReadFile("web/html/about.html")
+	if err != nil {
+		log.Printf("读取本地关于页面模板失败: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("<p style='color: #666; text-align: center; padding: 40px;'>读取页面模板失败</p>"))
+		return
+	}
+
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 	}
 
-	// 获取远程版本信息（从 main.go 中提取）
 	var remoteVersionInt int
 	var remoteVersionTxt string
 	var hasNewVersion bool
+	var downloadURL string
+	var downloadPlatform string
+	var releaseNotes string
 
 	versionResp, err := client.Get("https://raw.giteeusercontent.com/fangguihua1995/CorazaWafProxy/raw/main/main.go")
 	if err == nil {
 		defer versionResp.Body.Close()
 		versionContent, _ := io.ReadAll(versionResp.Body)
 		contentStr := string(versionContent)
-		
-		// 提取 localVersionInt
+
 		intMatch := regexp.MustCompile(`localVersionInt\s*=\s*(\d+)`).FindStringSubmatch(contentStr)
 		if len(intMatch) == 2 {
 			fmt.Sscanf(intMatch[1], "%d", &remoteVersionInt)
 		}
-		
-		// 提取 frontendVersion
+
 		txtMatch := regexp.MustCompile(`frontendVersion\s*=\s*"([^"]+)"`).FindStringSubmatch(contentStr)
 		if len(txtMatch) == 2 {
 			remoteVersionTxt = txtMatch[1]
 		}
-		
+
 		if remoteVersionInt > localVersionInt {
 			hasNewVersion = true
+			downloadURL = getDownloadURL(remoteVersionTxt, "gitee")
+			downloadPlatform = "Gitee"
 		}
 	}
 
-	// 获取关于页面内容
+	if !hasNewVersion {
+		githubResp, err := client.Get("https://raw.githubusercontent.com/fgh1995/CorazaWafProxy/main/main.go")
+		if err == nil {
+			defer githubResp.Body.Close()
+			versionContent, _ := io.ReadAll(githubResp.Body)
+			contentStr := string(versionContent)
+
+			intMatch := regexp.MustCompile(`localVersionInt\s*=\s*(\d+)`).FindStringSubmatch(contentStr)
+			if len(intMatch) == 2 {
+				fmt.Sscanf(intMatch[1], "%d", &remoteVersionInt)
+			}
+
+			txtMatch := regexp.MustCompile(`frontendVersion\s*=\s*"([^"]+)"`).FindStringSubmatch(contentStr)
+			if len(txtMatch) == 2 {
+				remoteVersionTxt = txtMatch[1]
+			}
+
+			if remoteVersionInt > localVersionInt {
+				hasNewVersion = true
+				downloadURL = getDownloadURL(remoteVersionTxt, "github")
+				downloadPlatform = "GitHub"
+			}
+		}
+	}
+
+	remoteContent := ""
 	resp, err := client.Get("https://raw.giteeusercontent.com/fangguihua1995/CorazaWafProxy/raw/main/about.html")
-	if err != nil {
-		log.Printf("获取关于页面失败: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("<p style='color: var(--text-muted); text-align: center; padding: 40px;'>获取关于页面失败</p>"))
-		return
-	}
-	defer resp.Body.Close()
-
-	content, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("读取关于页面内容失败: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("<p style='color: var(--text-muted); text-align: center; padding: 40px;'>读取关于页面失败</p>"))
-		return
+	if err == nil {
+		defer resp.Body.Close()
+		content, err := io.ReadAll(resp.Body)
+		if err == nil {
+			remoteContent = string(content)
+			startIdx := strings.Index(remoteContent, "<body>")
+			endIdx := strings.Index(remoteContent, "</body>")
+			if startIdx != -1 && endIdx != -1 {
+				remoteContent = remoteContent[startIdx+6 : endIdx]
+			}
+			remoteContent = strings.TrimSpace(remoteContent)
+		}
 	}
 
-	result := string(content)
+	result := string(localTemplate)
 	result = strings.ReplaceAll(result, "{localversion}", frontendVersion)
 	result = strings.ReplaceAll(result, "{remoteversion}", remoteVersionTxt)
 	result = strings.ReplaceAll(result, "{hasnewversion}", strconv.FormatBool(hasNewVersion))
 	result = strings.ReplaceAll(result, "{databaseversion}", getCurrentDBVersion())
+	result = strings.ReplaceAll(result, "{downloadurl}", downloadURL)
+	result = strings.ReplaceAll(result, "{downloadplatform}", downloadPlatform)
+	result = strings.ReplaceAll(result, "{releasenotes}", releaseNotes)
+	result = strings.ReplaceAll(result, "{remotecontent}", remoteContent)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(result))
+}
+
+func getDownloadURL(version, platform string) string {
+	goos := runtime.GOOS
+	goarch := runtime.GOARCH
+
+	var filename string
+	switch goos {
+	case "windows":
+		filename = fmt.Sprintf("CorazaWafProxy_windows_amd64.zip")
+	case "linux":
+		if goarch == "arm64" {
+			filename = fmt.Sprintf("CorazaWafProxy_linux_arm64.tar.gz")
+		} else {
+			filename = fmt.Sprintf("CorazaWafProxy_linux_amd64.tar.gz")
+		}
+	case "darwin":
+		if goarch == "arm64" {
+			filename = fmt.Sprintf("CorazaWafProxy_darwin_arm64.tar.gz")
+		} else {
+			filename = fmt.Sprintf("CorazaWafProxy_darwin_amd64.tar.gz")
+		}
+	default:
+		filename = fmt.Sprintf("CorazaWafProxy_windows_amd64.zip")
+	}
+
+	if platform == "gitee" {
+		return fmt.Sprintf("https://gitee.com/fangguihua1995/CorazaWafProxy/releases/download/%s/%s", version, filename)
+	}
+	return fmt.Sprintf("https://github.com/fgh1995/CorazaWafProxy/releases/download/%s/%s", version, filename)
+}
+
+type UpdateCheckResult struct {
+	HasNewVersion    bool   `json:"hasNewVersion"`
+	LocalVersion     string `json:"localVersion"`
+	RemoteVersion    string `json:"remoteVersion"`
+	DownloadURL      string `json:"downloadUrl"`
+	DownloadPlatform string `json:"downloadPlatform"`
+	ReleaseNotes     string `json:"releaseNotes"`
+}
+
+func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	result := UpdateCheckResult{
+		LocalVersion: frontendVersion,
+	}
+
+	var remoteVersionInt int
+	var remoteVersionTxt string
+
+	versionResp, err := client.Get("https://raw.giteeusercontent.com/fangguihua1995/CorazaWafProxy/raw/main/main.go")
+	if err == nil {
+		defer versionResp.Body.Close()
+		versionContent, _ := io.ReadAll(versionResp.Body)
+		contentStr := string(versionContent)
+
+		intMatch := regexp.MustCompile(`localVersionInt\s*=\s*(\d+)`).FindStringSubmatch(contentStr)
+		if len(intMatch) == 2 {
+			fmt.Sscanf(intMatch[1], "%d", &remoteVersionInt)
+		}
+
+		txtMatch := regexp.MustCompile(`frontendVersion\s*=\s*"([^"]+)"`).FindStringSubmatch(contentStr)
+		if len(txtMatch) == 2 {
+			remoteVersionTxt = txtMatch[1]
+		}
+
+		if remoteVersionInt > localVersionInt {
+			result.HasNewVersion = true
+			result.RemoteVersion = remoteVersionTxt
+			result.DownloadURL = getDownloadURL(remoteVersionTxt, "gitee")
+			result.DownloadPlatform = "Gitee"
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(result)
+			return
+		}
+	}
+
+	githubResp, err := client.Get("https://raw.githubusercontent.com/fgh1995/CorazaWafProxy/main/main.go")
+	if err == nil {
+		defer githubResp.Body.Close()
+		versionContent, _ := io.ReadAll(githubResp.Body)
+		contentStr := string(versionContent)
+
+		intMatch := regexp.MustCompile(`localVersionInt\s*=\s*(\d+)`).FindStringSubmatch(contentStr)
+		if len(intMatch) == 2 {
+			fmt.Sscanf(intMatch[1], "%d", &remoteVersionInt)
+		}
+
+		txtMatch := regexp.MustCompile(`frontendVersion\s*=\s*"([^"]+)"`).FindStringSubmatch(contentStr)
+		if len(txtMatch) == 2 {
+			remoteVersionTxt = txtMatch[1]
+		}
+
+		if remoteVersionInt > localVersionInt {
+			result.HasNewVersion = true
+			result.RemoteVersion = remoteVersionTxt
+			result.DownloadURL = getDownloadURL(remoteVersionTxt, "github")
+			result.DownloadPlatform = "GitHub"
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(result)
+			return
+		}
+	}
+
+	result.HasNewVersion = false
+	result.RemoteVersion = remoteVersionTxt
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(result)
+}
+
+type ManualUpdateResult struct {
+	Success      bool   `json:"success"`
+	Message     string `json:"message"`
+	NeedsRestart bool   `json:"needsRestart"`
+	BackupPath  string `json:"backupPath,omitempty"`
+}
+
+func handleManualUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	currentGOOS := runtime.GOOS
+	currentGOARCH := runtime.GOARCH
+
+	currentExec, err := os.Executable()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ManualUpdateResult{
+			Success:  false,
+			Message:  "无法获取当前程序路径: " + err.Error(),
+		})
+		return
+	}
+
+	file, header, err := r.FormFile("updatefile")
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ManualUpdateResult{
+			Success:  false,
+			Message:  "未上传更新文件: " + err.Error(),
+		})
+		return
+	}
+	defer file.Close()
+
+	filename := header.Filename
+	log.Printf("[手动更新] 收到更新文件: %s, 大小: %d bytes", filename, header.Size)
+
+	ext := strings.ToLower(filepath.Ext(filename))
+	isZip := ext == ".zip"
+	isTarGz := ext == ".gz" && strings.HasSuffix(filename, ".tar.gz")
+	isTgz := ext == ".tgz"
+
+	if !isZip && !isTarGz && !isTgz {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ManualUpdateResult{
+			Success:  false,
+			Message:  fmt.Sprintf("不支持的文件格式: %s，支持的格式: .zip, .tar.gz, .tgz", ext),
+		})
+		return
+	}
+
+	expectedExecName := getExpectedExecName(currentGOOS, currentGOARCH)
+	hasMismatch := false
+	var detectedGOOS, detectedGOARCH string
+
+	if isZip {
+		detectedGOOS, detectedGOARCH, err = detectArchFromZip(file, header.Size, expectedExecName)
+		if err != nil {
+			log.Printf("[手动更新] 无法从zip包检测架构: %v", err)
+			hasMismatch = true
+		}
+	} else {
+		detectedGOOS, detectedGOARCH, err = detectArchFromTarGz(file, header.Size, expectedExecName)
+		if err != nil {
+			log.Printf("[手动更新] 无法从tar.gz包检测架构: %v", err)
+			hasMismatch = true
+		}
+	}
+
+	if !hasMismatch && (detectedGOOS != currentGOOS || detectedGOARCH != currentGOARCH) {
+		log.Printf("[手动更新] 架构不匹配: 当前(%s/%s) vs 包内(%s/%s)", currentGOOS, currentGOARCH, detectedGOOS, detectedGOARCH)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ManualUpdateResult{
+			Success:  false,
+			Message:  fmt.Sprintf("架构不匹配！当前程序: %s/%s，更新包: %s/%s", currentGOOS, currentGOARCH, detectedGOOS, detectedGOARCH),
+		})
+		return
+	}
+
+	file.Seek(0, 0)
+
+	tmpDir, err := ioutil.TempDir("", "coraza-update-*")
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ManualUpdateResult{
+			Success:  false,
+			Message:  "创建临时目录失败: " + err.Error(),
+		})
+		return
+	}
+	defer os.RemoveAll(tmpDir)
+
+	var extractedPath string
+	if isZip {
+		extractedPath, err = extractZip(file, header.Size, tmpDir, expectedExecName)
+	} else {
+		extractedPath, err = extractTarGz(file, tmpDir, expectedExecName)
+	}
+
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ManualUpdateResult{
+			Success:  false,
+			Message:  "解压更新包失败: " + err.Error(),
+		})
+		return
+	}
+
+	backupPath := currentExec + ".bak"
+	if _, err := os.Stat(backupPath); err == nil {
+		os.Remove(backupPath)
+	}
+
+	if err := os.Rename(currentExec, backupPath); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ManualUpdateResult{
+			Success:  false,
+			Message:  "备份当前程序失败: " + err.Error(),
+		})
+		return
+	}
+
+	if err := os.Rename(extractedPath, currentExec); err != nil {
+		os.Rename(backupPath, currentExec)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ManualUpdateResult{
+			Success:     false,
+			Message:     "替换程序失败，已恢复原程序: " + err.Error(),
+			NeedsRestart: false,
+		})
+		return
+	}
+
+	os.Chmod(currentExec, 0755)
+
+	log.Printf("[手动更新] 程序已更新，旧程序备份为: %s", backupPath)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(ManualUpdateResult{
+		Success:      true,
+		Message:      fmt.Sprintf("更新成功！程序已替换为新版本 (原程序已备份为 %s)", backupPath),
+		NeedsRestart: true,
+		BackupPath:   backupPath,
+	})
+}
+
+func getExpectedExecName(goos, goarch string) string {
+	if goos == "windows" {
+		return "CorazaWafProxy.exe"
+	}
+	return "CorazaWafProxy"
+}
+
+func detectArchFromZip(file multipart.File, size int64, expectedName string) (goos, goarch string, err error) {
+	zipr, err := zip.NewReader(file, size)
+	if err != nil {
+		return "", "", err
+	}
+
+	for _, f := range zipr.File {
+		name := filepath.Base(f.Name)
+		if name == expectedName || name == expectedName+".exe" {
+			return parseArchFromFilename(expectedName)
+		}
+	}
+	return "", "", fmt.Errorf("未在压缩包中找到可执行文件 %s", expectedName)
+}
+
+func detectArchFromTarGz(file multipart.File, size int64, expectedName string) (goos, goarch string, err error) {
+	gzr, err := gzip.NewReader(file)
+	if err != nil {
+		return "", "", err
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			continue
+		}
+
+		name := filepath.Base(hdr.Name)
+		if name == expectedName || name == expectedName+".exe" {
+			return parseArchFromFilename(expectedName)
+		}
+	}
+	return "", "", fmt.Errorf("未在压缩包中找到可执行文件 %s", expectedName)
+}
+
+func parseArchFromFilename(filename string) (goos, goarch string, err error) {
+	lower := strings.ToLower(filename)
+
+	if strings.Contains(lower, "windows") {
+		goos = "windows"
+	} else if strings.Contains(lower, "linux") {
+		goos = "linux"
+	} else if strings.Contains(lower, "darwin") || strings.Contains(lower, "macos") {
+		goos = "darwin"
+	} else {
+		return "", "", fmt.Errorf("无法识别操作系统: %s", filename)
+	}
+
+	if strings.Contains(lower, "arm64") {
+		goarch = "arm64"
+	} else if strings.Contains(lower, "amd64") || strings.Contains(lower, "x86_64") {
+		goarch = "amd64"
+	} else {
+		return "", "", fmt.Errorf("无法识别架构: %s", filename)
+	}
+
+	return goos, goarch, nil
+}
+
+func extractZip(file multipart.File, size int64, destDir, expectedName string) (string, error) {
+	zipr, err := zip.NewReader(file, size)
+	if err != nil {
+		return "", err
+	}
+
+	var extractedPath string
+	for _, f := range zipr.File {
+		name := filepath.Base(f.Name)
+		if name != expectedName && name != expectedName+".exe" {
+			continue
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			return "", err
+		}
+
+		extractedPath = filepath.Join(destDir, name)
+		outFile, err := os.OpenFile(extractedPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
+		if err != nil {
+			rc.Close()
+			return "", err
+		}
+
+		if _, err := io.Copy(outFile, rc); err != nil {
+			rc.Close()
+			outFile.Close()
+			return "", err
+		}
+		rc.Close()
+		outFile.Close()
+		break
+	}
+
+	if extractedPath == "" {
+		return "", fmt.Errorf("未找到可执行文件")
+	}
+
+	return extractedPath, nil
+}
+
+func extractTarGz(file multipart.File, destDir, expectedName string) (string, error) {
+	gzr, err := gzip.NewReader(file)
+	if err != nil {
+		return "", err
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	var extractedPath string
+
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			continue
+		}
+
+		name := filepath.Base(hdr.Name)
+		if name != expectedName && name != expectedName+".exe" {
+			continue
+		}
+
+		if hdr.FileInfo().Mode().IsDir() {
+			continue
+		}
+
+		extractedPath = filepath.Join(destDir, name)
+		outFile, err := os.OpenFile(extractedPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
+		if err != nil {
+			return "", err
+		}
+
+		if _, err := io.Copy(outFile, tr); err != nil {
+			outFile.Close()
+			return "", err
+		}
+		outFile.Close()
+		break
+	}
+
+	if extractedPath == "" {
+		return "", fmt.Errorf("未找到可执行文件")
+	}
+
+	return extractedPath, nil
+}
+
+type SystemInfo struct {
+	GOOS         string `json:"goos"`
+	GOARCH       string `json:"goarch"`
+	NumCPU       int    `json:"numCpu"`
+	GoVersion    string `json:"goVersion"`
+	ProgramPath  string `json:"programPath"`
+	ProgramExe   string `json:"programExe"`
+	LocalVersion string `json:"localVersion"`
+}
+
+func handleSystemInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	execPath, _ := os.Executable()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(SystemInfo{
+		GOOS:         runtime.GOOS,
+		GOARCH:       runtime.GOARCH,
+		NumCPU:       runtime.NumCPU(),
+		GoVersion:    runtime.Version(),
+		ProgramPath:  execPath,
+		ProgramExe:   filepath.Base(execPath),
+		LocalVersion: frontendVersion,
+	})
 }
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -8900,6 +9413,9 @@ func main() {
 	mux.HandleFunc("/api/logout", readOnlyMiddleware(handleLogout))
 	mux.HandleFunc("/api/current-user", handleCurrentUser)
 	mux.HandleFunc("/api/about", handleAbout)
+	mux.HandleFunc("/api/check-update", handleCheckUpdate)
+	mux.HandleFunc("/api/system-info", handleSystemInfo)
+	mux.HandleFunc("/api/manual-update", handleManualUpdate)
 	mux.HandleFunc("/api/db-version", handleDBVersion)
 	mux.HandleFunc("/api/db-upgrade", readOnlyMiddleware(handleDBUpgrade))
 	mux.HandleFunc("/api/db-upgrade-progress", handleDBUpgradeProgress)

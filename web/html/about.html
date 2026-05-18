@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Coraza WAF Proxy - 关于</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+            background: #f5f7fa;
+            color: #1a2a3a;
+            line-height: 1.5;
+            padding: 48px 24px;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 24px;
+            padding: 48px 56px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.05);
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 12px;
+            letter-spacing: -0.01em;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            gap: 12px;
+        }
+
+        .version-group {
+            display: inline-flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 12px;
+            font-size: 1rem;
+            font-weight: normal;
+            margin-left: 8px;
+        }
+
+        .version-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: #f0f2f5;
+            padding: 4px 12px;
+            border-radius: 40px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: #1e3a5f;
+        }
+
+        .update-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 14px;
+            border-radius: 40px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            transition: all 0.2s ease;
+        }
+
+        .update-indicator.latest {
+            background: #e6f7e6;
+            color: #2e7d32;
+            border: 1px solid #b9f6ca;
+        }
+
+        .update-indicator.update-available {
+            background: #fff4e5;
+            color: #e65100;
+            border: 1px solid #ffe0b2;
+        }
+
+        .update-indicator.error {
+            background: #fee9e6;
+            color: #c62828;
+            border: 1px solid #ffcdd2;
+        }
+
+        .subhead {
+            font-size: 1.1rem;
+            color: #4a627a;
+            border-left: 4px solid #2563eb;
+            padding-left: 20px;
+            margin-bottom: 48px;
+        }
+
+        h2 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin: 32px 0 20px 0;
+            padding-bottom: 8px;
+            border-bottom: 2px solid #eef2f6;
+        }
+
+        h2:first-of-type {
+            margin-top: 0;
+        }
+
+        .feature-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 16px;
+            list-style: none;
+        }
+
+        .feature-list li {
+            background: #f8fafc;
+            padding: 12px 18px;
+            border-radius: 12px;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .feature-list li::before {
+            content: "✓";
+            color: #2563eb;
+            font-weight: bold;
+            font-size: 1.1rem;
+        }
+
+        .feature-list li a {
+            color: #2563eb;
+            text-decoration: none;
+            word-break: break-all;
+            overflow-wrap: break-word;
+        }
+
+        .feature-list li a:hover {
+            text-decoration: underline;
+        }
+
+        hr {
+            margin: 32px 0;
+            border: none;
+            border-top: 1px solid #eef2f6;
+        }
+
+        .footer-note {
+            color: #6c86a3;
+            font-size: 0.85rem;
+            margin-top: 32px;
+            text-align: center;
+        }
+
+        .update-card {
+            margin-top: 24px;
+            background: #fafcff;
+            border-radius: 16px;
+            border: 1px solid #e2edff;
+            padding: 16px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .update-message {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            flex-wrap: wrap;
+        }
+
+        .update-icon {
+            font-size: 1.4rem;
+        }
+
+        .update-text {
+            font-weight: 500;
+            color: #1f3a64;
+        }
+
+        .update-link {
+            background: #2563eb;
+            color: white;
+            border: none;
+            padding: 8px 20px;
+            border-radius: 32px;
+            font-weight: 600;
+            font-size: 0.85rem;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: background 0.2s;
+        }
+
+        .update-link:hover {
+            background: #1d4ed8;
+        }
+
+        @media (max-width: 640px) {
+            .container {
+                padding: 28px 20px;
+            }
+            h1 {
+                font-size: 1.8rem;
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            .version-group {
+                margin-left: 0;
+                margin-top: 8px;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>
+        Coraza WAF Proxy
+        <span class="version-group" id="versionGroup">
+        </span>
+    </h1>
+    <div class="subhead">基于 Coraza WAF 的反向代理防火墙，支持攻击检测、地理IP封锁和实时攻击日志。</div>
+
+    <div id="remoteContentArea">
+        {remotecontent}
+    </div>
+
+    <div id="updateNotificationArea" class="update-card" style="display: none;"></div>
+
+    <div class="update-card" id="manualUpdateCard" style="margin-top: 16px;">
+        <h3 style="margin: 0 0 12px 0; color: #1f3a64;">🔧 手动更新</h3>
+        <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+            <div style="flex: 1; min-width: 200px;">
+                <div id="systemInfoDisplay" style="font-size: 0.85rem; color: #666;">
+                    <span id="systemInfoLoading">加载中...</span>
+                </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <input type="file" id="updateFileInput" accept=".zip,.tar.gz,.tgz" style="display: none;" />
+                <button class="update-link" onclick="document.getElementById('updateFileInput').click()">
+                    📁 选择更新包
+                </button>
+                <button class="update-link" id="uploadUpdateBtn" onclick="uploadUpdatePackage()" style="background: #059669; display: none;">
+                    ⬆️ 开始更新
+                </button>
+            </div>
+        </div>
+        <div id="updateFileName" style="margin-top: 8px; font-size: 0.8rem; color: #666;"></div>
+        <div id="updateStatus" style="margin-top: 8px; font-size: 0.85rem;"></div>
+    </div>
+
+    <hr>
+
+    <div class="footer-note">
+        © Coraza WAF Proxy | 开源反向代理安全防护
+    </div>
+</div>
+
+<script>
+    var LOCAL_VERSION = "{localversion}";
+    var REMOTE_VERSION = "{remoteversion}";
+    var HAS_NEW_VERSION = "{hasnewversion}";
+    var DATABASE_VERSION = "{databaseversion}";
+    var DOWNLOAD_URL = "{downloadurl}";
+    var DOWNLOAD_PLATFORM = "{downloadplatform}";
+    var RELEASE_NOTES = "{releasenotes}";
+    var REMOTE_CONTENT = "";
+
+    function isNewVersionAvailable() {
+        if (typeof HAS_NEW_VERSION === 'boolean') {
+            return HAS_NEW_VERSION;
+        }
+        if (typeof HAS_NEW_VERSION === 'string') {
+            const lower = HAS_NEW_VERSION.toLowerCase().trim();
+            return lower === 'true' || lower === '1' || lower === 'yes';
+        }
+        return false;
+    }
+
+    function getVersionInfo() {
+        const local = (LOCAL_VERSION && LOCAL_VERSION !== "") ? LOCAL_VERSION : "未知版本";
+        const remote = (REMOTE_VERSION && REMOTE_VERSION !== "") ? REMOTE_VERSION : "未知版本";
+        const updateAvailable = isNewVersionAvailable();
+        return { local, remote, updateAvailable };
+    }
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return str.replace(/[&<>]/g, function(m) {
+            if (m === '&') return '&amp;';
+            if (m === '<') return '&lt;';
+            if (m === '>') return '&gt;';
+            return m;
+        });
+    }
+
+    function showUpdateConfirmation() {
+        const platform = DOWNLOAD_PLATFORM || '未知';
+        const version = REMOTE_VERSION || '最新版本';
+        const downloadUrl = DOWNLOAD_URL || '';
+
+        const confirmed = confirm(
+            `发现新版本 ${version}！\n\n` +
+            `下载平台: ${platform}\n\n` +
+            `是否前往下载页面？\n\n` +
+            `提示: 下载前请备份好当前配置。`
+        );
+
+        if (confirmed && downloadUrl) {
+            window.open(downloadUrl, '_blank');
+        }
+    }
+
+    function renderVersionAndUpdate() {
+        const { local, remote, updateAvailable } = getVersionInfo();
+        const versionGroup = document.getElementById('versionGroup');
+        if (!versionGroup) return;
+
+        const dbVersion = (DATABASE_VERSION && DATABASE_VERSION !== "") ? DATABASE_VERSION : "未知";
+
+        let versionHtml = `<span class="version-badge">🔖 当前版本 ${escapeHtml(local)}</span>`;
+        versionHtml += `<span class="version-badge">🗄️ 数据库版本 ${escapeHtml(dbVersion)}</span>`;
+
+        if (remote !== '未知版本') {
+            versionHtml += `<span class="version-badge">📦 最新版本 ${escapeHtml(remote)}</span>`;
+        }
+
+        let statusHtml = '';
+        if (updateAvailable) {
+            const platform = DOWNLOAD_PLATFORM || '';
+            const platformInfo = platform ? ` (来自 ${platform})` : '';
+            statusHtml = `<span class="update-indicator update-available" onclick="showUpdateConfirmation()" style="cursor:pointer;">⚡ 发现新版本${platformInfo} · 点击下载</span>`;
+        } else {
+            if (local !== '未知版本') {
+                statusHtml = `<span class="update-indicator latest">✅ 已是最新版本</span>`;
+            } else {
+                statusHtml = `<span class="update-indicator error">⚠️ 版本信息获取异常</span>`;
+            }
+        }
+
+        versionGroup.innerHTML = versionHtml + statusHtml;
+
+        if (updateAvailable) {
+            const updateArea = document.getElementById('updateNotificationArea');
+            if (updateArea) {
+                const platform = DOWNLOAD_PLATFORM || '未知';
+                const notes = RELEASE_NOTES || '';
+                updateArea.style.display = 'flex';
+                updateArea.innerHTML = `
+                    <div class="update-message">
+                        <span class="update-icon">🚀</span>
+                        <span class="update-text">
+                            发现新版本 <strong>${escapeHtml(REMOTE_VERSION || '')}</strong>，
+                            来自 <strong>${escapeHtml(platform)}</strong>
+                            ${notes ? '<br><small>' + escapeHtml(notes) + '</small>' : ''}
+                        </span>
+                    </div>
+                    <button class="update-link" onclick="showUpdateConfirmation()">
+                        📥 前往下载
+                    </button>
+                `;
+            }
+        }
+
+        const remoteContentArea = document.getElementById('remoteContentArea');
+        if (remoteContentArea && REMOTE_CONTENT) {
+            remoteContentArea.innerHTML = REMOTE_CONTENT;
+        }
+    }
+
+    function loadSystemInfo() {
+        fetch('/api/system-info')
+            .then(function(response) { return response.json(); })
+            .then(function(data) {
+                document.getElementById('systemInfoLoading').style.display = 'none';
+                document.getElementById('systemInfoDisplay').innerHTML =
+                    '当前平台: <strong>' + escapeHtml(data.goos) + '/' + escapeHtml(data.goarch) + '</strong> | ' +
+                    '程序路径: <code>' + escapeHtml(data.programPath || '') + '</code>';
+            })
+            .catch(function(err) {
+                document.getElementById('systemInfoLoading').textContent = '加载系统信息失败';
+                console.error('Failed to load system info:', err);
+            });
+    }
+
+    function setupFileInput() {
+        var fileInput = document.getElementById('updateFileInput');
+        if (!fileInput) return;
+
+        fileInput.addEventListener('change', function(e) {
+            var file = e.target.files[0];
+            if (!file) return;
+
+            var fileNameEl = document.getElementById('updateFileName');
+            var uploadBtn = document.getElementById('uploadUpdateBtn');
+            var statusEl = document.getElementById('updateStatus');
+
+            fileNameEl.textContent = '已选择: ' + file.name + ' (' + formatFileSize(file.size) + ')';
+            uploadBtn.style.display = 'inline-flex';
+            statusEl.textContent = '';
+            statusEl.style.color = '';
+        });
+    }
+
+    function formatFileSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function uploadUpdatePackage() {
+        var fileInput = document.getElementById('updateFileInput');
+        var statusEl = document.getElementById('updateStatus');
+        var uploadBtn = document.getElementById('uploadUpdateBtn');
+
+        var file = fileInput.files[0];
+        if (!file) {
+            statusEl.textContent = '请先选择更新包';
+            statusEl.style.color = '#dc2626';
+            return;
+        }
+
+        var confirmed = confirm(
+            '即将使用手动更新的方式替换程序。\n\n' +
+            '更新包: ' + file.name + '\n\n' +
+            '更新后需要重启服务才能生效。\n' +
+            '是否继续？'
+        );
+
+        if (!confirmed) return;
+
+        statusEl.textContent = '正在上传并更新...';
+        statusEl.style.color = '#2563eb';
+        uploadBtn.disabled = true;
+        uploadBtn.textContent = '⏳ 更新中...';
+
+        var formData = new FormData();
+        formData.append('updatefile', file);
+
+        fetch('/api/manual-update', {
+            method: 'POST',
+            body: formData
+        })
+        .then(function(response) { return response.json(); })
+        .then(function(data) {
+            if (data.success) {
+                statusEl.textContent = '✅ ' + data.message;
+                statusEl.style.color = '#059669';
+                alert('更新成功！请手动重启服务以使用新版本。\n\n旧程序已备份为: ' + (data.backupPath || 'program.exe.bak'));
+            } else {
+                statusEl.textContent = '❌ ' + data.message;
+                statusEl.style.color = '#dc2626';
+            }
+        })
+        .catch(function(err) {
+            statusEl.textContent = '❌ 更新失败: ' + err.message;
+            statusEl.style.color = '#dc2626';
+            console.error('Update failed:', err);
+        })
+        .finally(function() {
+            uploadBtn.disabled = false;
+            uploadBtn.textContent = '⬆️ 开始更新';
+        });
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        renderVersionAndUpdate();
+        loadSystemInfo();
+        setupFileInput();
+    });
+</script>
+</body>
+</html>

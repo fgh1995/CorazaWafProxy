@@ -1,0 +1,67 @@
+gitee:
+  trigger_paths:
+    - master
+    - main
+  push:
+    branches:
+      - master
+      - main
+    tags:
+      - 'v*'
+
+windows_build:
+  runs:
+    - runte-1
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+    - name: Build Windows amd64
+      env:
+        GOOS: windows
+        GOARCH: amd64
+      run: |
+        mkdir -p release
+        go build -ldflags "-s -w" -o release/CorazaWafProxy_windows_amd64.exe .
+        cd release && powershell -Command "Compress-Archive -Force CorazaWafProxy_windows_amd64.exe CorazaWafProxy_windows_amd64.zip"
+
+linux_amd64_build:
+  runs:
+    - runte-1
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+    - name: Build Linux amd64
+      env:
+        GOOS: linux
+        GOARCH: amd64
+      run: |
+        mkdir -p release
+        go build -ldflags "-s -w" -o release/CorazaWafProxy_linux_amd64 .
+        cd release && tar -czf CorazaWafProxy_linux_amd64.tar.gz CorazaWafProxy_linux_amd64
+
+linux_arm64_build:
+  runs:
+    - runte-1
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+    - name: Build Linux arm64
+      env:
+        GOOS: linux
+        GOARCH: arm64
+      run: |
+        mkdir -p release
+        go build -ldflags "-s -w" -o release/CorazaWafProxy_linux_arm64 .
+        cd release && tar -czf CorazaWafProxy_linux_arm64.tar.gz CorazaWafProxy_linux_arm64

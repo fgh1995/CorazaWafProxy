@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name'
+        required: true
+        default: 'v0.0.0'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Build Windows amd64
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          mkdir -p release
+          go build -ldflags "-s -w" -o release/CorazaWafProxy_windows_amd64.exe .
+          cd release && powershell -Command "Compress-Archive -Force CorazaWafProxy_windows_amd64.exe CorazaWafProxy_windows_amd64.zip"
+
+      - name: Build Linux amd64
+        env:
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build -ldflags "-s -w" -o release/CorazaWafProxy_linux_amd64 .
+          cd release && tar -czf CorazaWafProxy_linux_amd64.tar.gz CorazaWafProxy_linux_amd64
+
+      - name: Build Linux arm64
+        env:
+          GOOS: linux
+          GOARCH: arm64
+        run: |
+          go build -ldflags "-s -w" -o release/CorazaWafProxy_linux_arm64 .
+          cd release && tar -czf CorazaWafProxy_linux_arm64.tar.gz CorazaWafProxy_linux_arm64
+
+      - name: Build macOS amd64
+        env:
+          GOOS: darwin
+          GOARCH: amd64
+        run: |
+          go build -ldflags "-s -w" -o release/CorazaWafProxy_darwin_amd64 .
+          cd release && tar -czf CorazaWafProxy_darwin_amd64.tar.gz CorazaWafProxy_darwin_amd64
+
+      - name: Build macOS arm64 (Apple Silicon)
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+        run: |
+          go build -ldflags "-s -w" -o release/CorazaWafProxy_darwin_arm64 .
+          cd release && tar -czf CorazaWafProxy_darwin_arm64.tar.gz CorazaWafProxy_darwin_arm64
+
+      - name: Create SHA256 checksums
+        run: |
+          cd release
+          sha256sum *.exe *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: Coraza WAF Proxy ${{ steps.version.outputs.VERSION }}
+          body: |
+            ## Coraza WAF Proxy ${{ steps.version.outputs.VERSION }}
+
+            ### Download
+            - Windows (x86_64): `CorazaWafProxy_windows_amd64.zip`
+            - Linux (x86_64): `CorazaWafProxy_linux_amd64.tar.gz`
+            - Linux (ARM64): `CorazaWafProxy_linux_arm64.tar.gz`
+            - macOS (x86_64): `CorazaWafProxy_darwin_amd64.tar.gz`
+            - macOS (ARM64): `CorazaWafProxy_darwin_arm64.tar.gz`
+
+            ### Checksums
+            See `SHA256SUMS.txt` for file integrity checksums.
+          files: |
+            release/*.zip
+            release/*.tar.gz
+            release/SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
