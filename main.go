@@ -899,7 +899,7 @@ func refreshTrendCache() {
 	log.Printf("[DEBUG] refreshTrendCache: 完成")
 }
 
-const currentDBVersion = "1.5"
+const currentDBVersion = "1.6"
 
 func getCurrentDBVersion() string {
 	var version string
@@ -1405,6 +1405,20 @@ func upgradeTo15() error {
 	}
 
 	log.Println("升级到 1.5 完成")
+
+	updateUpgradeProgress("migrating", 5, 5, "迁移到 1.6...")
+	_, err = db.Exec("INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('github_mirror', '', ?)", getUTCTimestamp())
+	if err != nil {
+		log.Printf("添加 github_mirror 设置失败: %v", err)
+	}
+
+	updateUpgradeProgress("finalizing", 5, 5, "更新数据库版本...")
+	err = setDBVersion("1.6")
+	if err != nil {
+		return fmt.Errorf("更新数据库版本失败: %w", err)
+	}
+
+	log.Println("升级到 1.6 完成")
 	return nil
 }
 
@@ -4308,6 +4322,24 @@ func handleAbout(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(result))
 }
 
+func convertToMirrorURL(url string) string {
+	if !strings.HasPrefix(url, "https://github.com/") && !strings.HasPrefix(url, "http://github.com/") {
+		return url
+	}
+
+	var mirror string
+	err := db.QueryRow("SELECT value FROM system_settings WHERE key = 'github_mirror'").Scan(&mirror)
+	if err != nil || mirror == "" {
+		return url
+	}
+
+	mirror = strings.TrimSuffix(mirror, "/")
+	if strings.HasPrefix(url, "https://github.com/") {
+		return strings.Replace(url, "https://github.com/", mirror+"/", 1)
+	}
+	return strings.Replace(url, "http://github.com/", mirror+"/", 1)
+}
+
 func getDownloadURL(version, platform string) string {
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
@@ -4335,7 +4367,7 @@ func getDownloadURL(version, platform string) string {
 	if platform == "gitee" {
 		return fmt.Sprintf("https://gitee.com/fangguihua1995/CorazaWafProxy/releases/download/%s/%s", version, filename)
 	}
-	return fmt.Sprintf("https://github.com/fgh1995/CorazaWafProxy/releases/download/%s/%s", version, filename)
+	return convertToMirrorURL(fmt.Sprintf("https://github.com/fgh1995/CorazaWafProxy/releases/download/%s/%s", version, filename))
 }
 
 type UpdateCheckResult struct {
@@ -8736,21 +8768,29 @@ func handleTrendData(w http.ResponseWriter, r *http.Request) {
 
 func handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	if r.Method == "GET" {
 		var adminPortStr string
 		err := db.QueryRow("SELECT value FROM system_settings WHERE key = ?", "admin_port").Scan(&adminPortStr)
 		if err != nil {
 			adminPortStr = "15501"
 		}
-		
+
+		var githubMirror string
+		err = db.QueryRow("SELECT value FROM system_settings WHERE key = ?", "github_mirror").Scan(&githubMirror)
+		if err != nil {
+			githubMirror = ""
+		}
+
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"adminPort": adminPortStr,
+			"success":      true,
+			"adminPort":    adminPortStr,
+			"githubMirror": githubMirror,
 		})
 	} else if r.Method == "PUT" {
 		var req struct {
-			AdminPort string `json:"adminPort"`
+			AdminPort    string `json:"adminPort"`
+			GithubMirror string `json:"githubMirror"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -8760,70 +8800,93 @@ func handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		
-		newPort, err := strconv.Atoi(req.AdminPort)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   "端口格式错误",
-			})
-			return
-		}
-		
-		if newPort < 1024 || newPort > 65535 {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   "端口必须在1024-65535之间",
-			})
-			return
-		}
-		
-		proxyMutex.RLock()
-		for _, instance := range proxyInstances {
-			if instance.ListenPort == newPort {
-				proxyMutex.RUnlock()
+
+		var err error
+		if req.AdminPort != "" {
+			newPort, atoiErr := strconv.Atoi(req.AdminPort)
+			if atoiErr != nil {
 				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"success": false,
-					"error":   "端口 " + req.AdminPort + " 已被防护应用占用",
+					"error":   "端口格式错误",
+				})
+				return
+			}
+			err = atoiErr
+
+			if newPort < 1024 || newPort > 65535 {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"error":   "端口必须在1024-65535之间",
+				})
+				return
+			}
+
+			proxyMutex.RLock()
+			for _, instance := range proxyInstances {
+				if instance.ListenPort == newPort {
+					proxyMutex.RUnlock()
+					w.WriteHeader(http.StatusBadRequest)
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"success": false,
+						"error":   "端口 " + req.AdminPort + " 已被防护应用占用",
+					})
+					return
+				}
+			}
+			proxyMutex.RUnlock()
+
+			if isPortInUse(newPort) {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"error":   "端口 " + req.AdminPort + " 已被其他程序占用",
+				})
+				return
+			}
+
+			_, err = db.Exec("UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?",
+				req.AdminPort, getUTCTimestamp(), "admin_port")
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"error":   "更新设置失败",
+				})
+				return
+			}
+
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"message": "管理端口已更新，服务将在3秒后重启",
+			})
+
+			go func() {
+				time.Sleep(3 * time.Second)
+				log.Println("正在重启服务以应用新的管理端口...")
+				restartProgram()
+			}()
+			return
+		}
+
+		if req.GithubMirror != "" {
+			_, err = db.Exec("UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?",
+				req.GithubMirror, getUTCTimestamp(), "github_mirror")
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"error":   "更新设置失败",
 				})
 				return
 			}
 		}
-		proxyMutex.RUnlock()
-		
-		if isPortInUse(newPort) {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   "端口 " + req.AdminPort + " 已被其他程序占用",
-			})
-			return
-		}
-		
-		_, err = db.Exec("UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?", 
-			req.AdminPort, getUTCTimestamp(), "admin_port")
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   "更新设置失败",
-			})
-			return
-		}
-		
+
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"message": "管理端口已更新，服务将在3秒后重启",
+			"message": "设置已更新",
 		})
-		
-		go func() {
-			time.Sleep(3 * time.Second)
-			log.Println("正在重启服务以应用新的管理端口...")
-			restartProgram()
-		}()
 	}
 }
 
