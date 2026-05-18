@@ -4905,9 +4905,9 @@ func extractZip(file multipart.File, size int64, destDir, expectedName string) (
 
 	var extractedPath string
 	for _, f := range zipr.File {
-		name := f.Name
+		name := strings.ReplaceAll(f.Name, "/", string(filepath.Separator))
 
-		if strings.HasPrefix(name, "data/") || strings.HasPrefix(name, "data\\") {
+		if strings.HasPrefix(name, "data"+string(filepath.Separator)) {
 			continue
 		}
 
@@ -4935,7 +4935,7 @@ func extractZip(file multipart.File, size int64, destDir, expectedName string) (
 		}
 
 		headerPath := filepath.Join(destDir, name)
-		if strings.HasSuffix(name, "/") {
+		if strings.HasSuffix(name, string(filepath.Separator)) {
 			os.MkdirAll(headerPath, 0755)
 			continue
 		}
