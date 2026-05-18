@@ -54,8 +54,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.11"
-const localVersionInt = 40110 // 版本整数值，用于对比
+const frontendVersion = "v0.4.12"
+const localVersionInt = 40120 // 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
@@ -4515,7 +4515,6 @@ func handleManualUpdate(w http.ResponseWriter, r *http.Request) {
 
 	file.Seek(0, 0)
 
-	execDir := filepath.Dir(currentExec)
 	tmpDir, err := ioutil.TempDir("", "coraza-update-*")
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -4571,46 +4570,54 @@ func handleManualUpdate(w http.ResponseWriter, r *http.Request) {
 
 	os.Chmod(currentExec, 0755)
 
-	updateScriptPath := filepath.Join(execDir, "update-helper.bat")
-	var scriptContent string
-	if currentGOOS == "windows" {
-		scriptContent = fmt.Sprintf(`@echo off
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(ManualUpdateResult{
+		Success:      true,
+		Message:      "更新成功！服务正在重启...",
+		NeedsRestart: true,
+	})
+
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		execDir := filepath.Dir(currentExec)
+		updateScriptPath := filepath.Join(execDir, "update-restart.bat")
+		if currentGOOS == "windows" {
+			scriptContent := fmt.Sprintf(`@echo off
 :wait
 ping -n 2 127.0.0.1 >nul
 if exist "%s" goto wait
 del "%s" 2>nul
 del "%s" 2>nul
+start "" "%s"
 del "%%~f0" 2>nul
-`, currentExec, updatingExecPath, updateScriptPath)
-		if err := ioutil.WriteFile(updateScriptPath, []byte(scriptContent), 0755); err != nil {
-			log.Printf("[手动更新] 创建更新脚本失败: %v", err)
-		}
-	} else {
-		scriptContent = fmt.Sprintf(`#!/bin/bash
+`, updatingExecPath, updatingExecPath, updateScriptPath, currentExec)
+			updateScriptPath := filepath.Join(execDir, "update-restart.bat")
+			ioutil.WriteFile(updateScriptPath, []byte(scriptContent), 0755)
+			goexec := os.Getenv("COMSPEC")
+			if goexec == "" {
+				goexec = "cmd.exe"
+			}
+			exec.Command(goexec, "/C", "start", "", updateScriptPath).Start()
+		} else {
+			scriptContent := fmt.Sprintf(`#!/bin/bash
 while [ -f "%s" ]; do
     sleep 0.5
 done
 rm -f "%s"
 rm -f "%s"
+"%s" &
 rm -f "$0"
-`, currentExec, updatingExecPath, updateScriptPath)
-		scriptPath := filepath.Join(execDir, "update-helper.sh")
-		if err := ioutil.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
-			log.Printf("[手动更新] 创建更新脚本失败: %v", err)
+`, updatingExecPath, updatingExecPath, updateScriptPath, currentExec)
+			updateScriptPath := filepath.Join(execDir, "update-restart.sh")
+			ioutil.WriteFile(updateScriptPath, []byte(scriptContent), 0755)
+			os.Chmod(updateScriptPath, 0755)
+			exec.Command("/bin/bash", updateScriptPath).Start()
 		}
-		goexec := "/bin/bash"
-		exec.Command(goexec, scriptPath).Start()
-	}
-
-	log.Printf("[手动更新] 程序已就绪: %s -> %s", updatingExecPath, currentExec)
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(ManualUpdateResult{
-		Success:      true,
-		Message:      "更新已准备就绪！旧程序将在服务重启后自动清理。请手动重启服务。",
-		NeedsRestart: true,
-	})
+		log.Println("[手动更新] 服务即将重启...")
+		time.Sleep(1 * time.Second)
+		os.Exit(0)
+	}()
 }
 
 func handleAutoUpdate(w http.ResponseWriter, r *http.Request) {
@@ -4754,7 +4761,6 @@ func handleAutoUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	execDir := filepath.Dir(currentExec)
 	updatingExecPath := currentExec + ".updating"
 
 	if err := os.Rename(currentExec, updatingExecPath); err != nil {
@@ -4780,39 +4786,51 @@ func handleAutoUpdate(w http.ResponseWriter, r *http.Request) {
 
 	os.Chmod(currentExec, 0755)
 
-	if currentGOOS == "windows" {
-		scriptContent := fmt.Sprintf(`@echo off
-:wait
-ping -n 2 127.0.0.1 >nul
-if exist "%s" goto wait
-del "%s" 2>nul
-del "%%~f0" 2>nul
-`, currentExec, updatingExecPath)
-		scriptPath := filepath.Join(execDir, "update-helper.bat")
-		ioutil.WriteFile(scriptPath, []byte(scriptContent), 0755)
-	} else {
-		scriptContent := fmt.Sprintf(`#!/bin/bash
-while [ -f "%s" ]; do
-    sleep 0.5
-done
-rm -f "%s"
-rm -f "$0"
-`, currentExec, updatingExecPath)
-		scriptPath := filepath.Join(execDir, "update-helper.sh")
-		ioutil.WriteFile(scriptPath, []byte(scriptContent), 0755)
-		goexec := "/bin/bash"
-		exec.Command(goexec, scriptPath).Start()
-	}
-
-	log.Printf("[自动更新] 程序已就绪: %s -> %s", updatingExecPath, currentExec)
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(AutoUpdateResult{
 		Success:      true,
-		Message:      "更新已准备就绪！旧程序将在服务重启后自动清理。请手动重启服务。",
+		Message:      "更新成功！服务正在重启...",
 		NeedsRestart: true,
 	})
+
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		execDir := filepath.Dir(currentExec)
+		if currentGOOS == "windows" {
+			scriptContent := fmt.Sprintf(`@echo off
+:wait
+ping -n 2 127.0.0.1 >nul
+if exist "%s" goto wait
+del "%s" 2>nul
+start "" "%s"
+del "%%~f0" 2>nul
+`, updatingExecPath, updatingExecPath, currentExec)
+			restartScriptPath := filepath.Join(execDir, "update-restart.bat")
+			ioutil.WriteFile(restartScriptPath, []byte(scriptContent), 0755)
+			goexec := os.Getenv("COMSPEC")
+			if goexec == "" {
+				goexec = "cmd.exe"
+			}
+			exec.Command(goexec, "/C", "start", "", restartScriptPath).Start()
+		} else {
+			scriptContent := fmt.Sprintf(`#!/bin/bash
+while [ -f "%s" ]; do
+    sleep 0.5
+done
+rm -f "%s"
+"%s" &
+rm -f "$0"
+`, updatingExecPath, updatingExecPath, currentExec)
+			restartScriptPath := filepath.Join(execDir, "update-restart.sh")
+			ioutil.WriteFile(restartScriptPath, []byte(scriptContent), 0755)
+			os.Chmod(restartScriptPath, 0755)
+			exec.Command("/bin/bash", restartScriptPath).Start()
+		}
+		log.Println("[自动更新] 服务即将重启...")
+		time.Sleep(1 * time.Second)
+		os.Exit(0)
+	}()
 }
 
 type AutoUpdateResult struct {
@@ -4827,10 +4845,25 @@ type UpdateDownloadRequest struct {
 }
 
 func getExpectedExecName(goos, goarch string) string {
-	if goos == "windows" {
-		return "CorazaWafProxy.exe"
+	switch goos {
+	case "windows":
+		if goarch == "arm64" {
+			return "CorazaWafProxy-windows-arm64.exe"
+		}
+		return "CorazaWafProxy-windows-amd64.exe"
+	case "linux":
+		if goarch == "arm64" {
+			return "coraza-waf-proxy-linux-arm64"
+		}
+		return "coraza-waf-proxy-linux-amd64"
+	case "darwin":
+		if goarch == "arm64" {
+			return "coraza-waf-proxy-darwin-arm64"
+		}
+		return "coraza-waf-proxy-darwin-amd64"
+	default:
+		return "coraza-waf-proxy"
 	}
-	return "CorazaWafProxy"
 }
 
 func detectArchFromZip(file multipart.File, size int64, expectedName string) (goos, goarch string, err error) {
@@ -4842,7 +4875,7 @@ func detectArchFromZip(file multipart.File, size int64, expectedName string) (go
 	for _, f := range zipr.File {
 		name := filepath.Base(f.Name)
 		if name == expectedName || name == expectedName+".exe" {
-			return parseArchFromFilename(expectedName)
+			return parseArchFromFilename(name)
 		}
 	}
 	return "", "", fmt.Errorf("未在压缩包中找到可执行文件 %s", expectedName)
@@ -4867,7 +4900,7 @@ func detectArchFromTarGz(file multipart.File, size int64, expectedName string) (
 
 		name := filepath.Base(hdr.Name)
 		if name == expectedName || name == expectedName+".exe" {
-			return parseArchFromFilename(expectedName)
+			return parseArchFromFilename(name)
 		}
 	}
 	return "", "", fmt.Errorf("未在压缩包中找到可执行文件 %s", expectedName)
