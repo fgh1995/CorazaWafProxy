@@ -48,8 +48,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.8"
-const localVersionInt = 4080 // 版本整数值，用于对比
+const frontendVersion = "v0.4.9"
+const localVersionInt = 4090 // 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
@@ -634,6 +634,111 @@ var certStopChannels sync.Map
 var attackLogs []AttackLog
 var logsMutex sync.Mutex
 var geoipReader *geoip2.Reader
+
+type IPSettingsCache struct {
+	Mode       string
+	ActionMode string
+}
+
+type IPCache struct {
+	whitelist     map[string]bool
+	blacklist     map[string]bool
+	whitelistCount int
+	blacklistCount int
+	settings      IPSettingsCache
+	lastUpdate    time.Time
+}
+
+var ipCache = &IPCache{
+	whitelist: make(map[string]bool),
+	blacklist: make(map[string]bool),
+}
+
+var ipCacheMutex sync.RWMutex
+var ipCacheDuration = 30 * time.Second
+
+func refreshIPCache() {
+	ipCacheMutex.Lock()
+	defer ipCacheMutex.Unlock()
+
+	var mode, actionMode string
+	err := db.QueryRow("SELECT mode, action_mode FROM ip_settings ORDER BY id DESC LIMIT 1").Scan(&mode, &actionMode)
+	if err != nil {
+		mode = "normal"
+		actionMode = "block"
+	}
+
+	whitelist := make(map[string]bool)
+	rows, err := db.Query("SELECT ip FROM ip_whitelist")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var whitelistIP string
+			rows.Scan(&whitelistIP)
+			whitelist[whitelistIP] = true
+		}
+	}
+
+	blacklist := make(map[string]bool)
+	rows, err = db.Query("SELECT ip FROM ip_blacklist")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var blacklistIP string
+			rows.Scan(&blacklistIP)
+			blacklist[blacklistIP] = true
+		}
+	}
+
+	var whitelistCount, blacklistCount int
+	db.QueryRow("SELECT COUNT(*) FROM ip_whitelist").Scan(&whitelistCount)
+	db.QueryRow("SELECT COUNT(*) FROM ip_blacklist").Scan(&blacklistCount)
+
+	ipCache.whitelist = whitelist
+	ipCache.blacklist = blacklist
+	ipCache.whitelistCount = whitelistCount
+	ipCache.blacklistCount = blacklistCount
+	ipCache.settings = IPSettingsCache{Mode: mode, ActionMode: actionMode}
+	ipCache.lastUpdate = time.Now()
+}
+
+func getIPSettings() (mode, actionMode string, whitelistCount, blacklistCount int, whitelist map[string]bool) {
+	ipCacheMutex.RLock()
+	if time.Since(ipCache.lastUpdate) > ipCacheDuration {
+		ipCacheMutex.RUnlock()
+		refreshIPCache()
+		ipCacheMutex.RLock()
+	}
+	mode = ipCache.settings.Mode
+	actionMode = ipCache.settings.ActionMode
+	whitelistCount = ipCache.whitelistCount
+	blacklistCount = ipCache.blacklistCount
+	whitelist = ipCache.whitelist
+	ipCacheMutex.RUnlock()
+	return
+}
+
+func isIPInWhitelistCached(cleanIP string) bool {
+	ipCacheMutex.RLock()
+	defer ipCacheMutex.RUnlock()
+	for ip := range ipCache.whitelist {
+		if isIPInCIDR(cleanIP, ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func isIPInBlacklistCached(cleanIP string) bool {
+	ipCacheMutex.RLock()
+	defer ipCacheMutex.RUnlock()
+	for ip := range ipCache.blacklist {
+		if isIPInCIDR(cleanIP, ip) {
+			return true
+		}
+	}
+	return false
+}
 
 var ruleMessageCN = map[string]string{
 	"Inbound Anomaly Score Exceeded":                          "入站异常评分超标",
@@ -2915,47 +3020,10 @@ func (ic *ipCheckHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
-	var mode string
-	var actionMode string
-	err := db.QueryRow("SELECT mode, action_mode FROM ip_settings ORDER BY id DESC LIMIT 1").Scan(&mode, &actionMode)
-	if err != nil {
-		mode = "normal"
-		actionMode = "block"
-	}
+	mode, actionMode, whitelistCount, blacklistCount, _ := getIPSettings()
 	
-	var isWhitelisted bool
-	var isBlacklisted bool
-	
-	rows, err := db.Query("SELECT ip FROM ip_whitelist ORDER BY CASE WHEN source='custom' THEN 0 ELSE 1 END")
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var whitelistIP string
-			rows.Scan(&whitelistIP)
-			if isIPInCIDR(cleanIP, whitelistIP) {
-				isWhitelisted = true
-				break
-			}
-		}
-	}
-	
-	rows, err = db.Query("SELECT ip FROM ip_blacklist ORDER BY CASE WHEN source='custom' THEN 0 ELSE 1 END")
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var blacklistIP string
-			rows.Scan(&blacklistIP)
-			if isIPInCIDR(cleanIP, blacklistIP) {
-				isBlacklisted = true
-				break
-			}
-		}
-	}
-	
-	var whitelistCount int
-	var blacklistCount int
-	db.QueryRow("SELECT COUNT(*) FROM ip_whitelist").Scan(&whitelistCount)
-	db.QueryRow("SELECT COUNT(*) FROM ip_blacklist").Scan(&blacklistCount)
+	isWhitelisted := isIPInWhitelistCached(cleanIP)
+	isBlacklisted := isIPInBlacklistCached(cleanIP)
 	
 	var ipCheckResult string
 	var ipCheckAction string
@@ -3072,20 +3140,21 @@ func (ic *ipCheckHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 type statsResponseWriter struct {
 	http.ResponseWriter
-	statusCode int
-	size       int
+	statusCode    int
+	size          int
+	inboundBytes  int64
+	outboundBytes int64
 }
 
 type statsRequestBody struct {
 	io.ReadCloser
+	srw *statsResponseWriter
 }
 
 func (r *statsRequestBody) Read(p []byte) (int, error) {
 	n, err := r.ReadCloser.Read(p)
 	if n > 0 {
-		statsMutex.Lock()
-		trafficStats.InboundBytes += int64(n)
-		statsMutex.Unlock()
+		r.srw.inboundBytes += int64(n)
 	}
 	return n, err
 }
@@ -3098,9 +3167,7 @@ func (w *statsResponseWriter) WriteHeader(statusCode int) {
 func (w *statsResponseWriter) Write(b []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(b)
 	w.size += n
-	statsMutex.Lock()
-	trafficStats.OutboundBytes += int64(n)
-	statsMutex.Unlock()
+	w.outboundBytes += int64(n)
 	return n, err
 }
 
@@ -3110,6 +3177,15 @@ func (w *statsResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		return nil, nil, fmt.Errorf("response writer cannot hijack")
 	}
 	return hijacker.Hijack()
+}
+
+func flushTrafficStats(w *statsResponseWriter) {
+	if w.inboundBytes > 0 || w.outboundBytes > 0 {
+		statsMutex.Lock()
+		trafficStats.InboundBytes += w.inboundBytes
+		trafficStats.OutboundBytes += w.outboundBytes
+		statsMutex.Unlock()
+	}
 }
 
 func (wh *wafHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -3135,47 +3211,10 @@ func (wh *wafHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
-	var mode string
-	var actionMode string
-	err := db.QueryRow("SELECT mode, action_mode FROM ip_settings ORDER BY id DESC LIMIT 1").Scan(&mode, &actionMode)
-	if err != nil {
-		mode = "normal"
-		actionMode = "block"
-	}
+	mode, actionMode, whitelistCount, blacklistCount, _ := getIPSettings()
 	
-	var isWhitelisted bool
-	var isBlacklisted bool
-	
-	rows, err := db.Query("SELECT ip FROM ip_whitelist ORDER BY CASE WHEN source='custom' THEN 0 ELSE 1 END")
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var whitelistIP string
-			rows.Scan(&whitelistIP)
-			if isIPInCIDR(cleanIP, whitelistIP) {
-				isWhitelisted = true
-				break
-			}
-		}
-	}
-	
-	rows, err = db.Query("SELECT ip FROM ip_blacklist ORDER BY CASE WHEN source='custom' THEN 0 ELSE 1 END")
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var blacklistIP string
-			rows.Scan(&blacklistIP)
-			if isIPInCIDR(cleanIP, blacklistIP) {
-				isBlacklisted = true
-				break
-			}
-		}
-	}
-	
-	var whitelistCount int
-	var blacklistCount int
-	db.QueryRow("SELECT COUNT(*) FROM ip_whitelist").Scan(&whitelistCount)
-	db.QueryRow("SELECT COUNT(*) FROM ip_blacklist").Scan(&blacklistCount)
+	isWhitelisted := isIPInWhitelistCached(cleanIP)
+	isBlacklisted := isIPInBlacklistCached(cleanIP)
 	
 	var ipCheckResult string
 	var ipCheckAction string
@@ -3365,6 +3404,7 @@ func (wh *wafHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		tx.ProcessLogging()
 		tx.Close()
 		
+		flushTrafficStats(statsRW)
 		updateStats(r.RemoteAddr, statsRW.statusCode, false)
 	}()
 
@@ -3473,7 +3513,7 @@ func (wh *wafHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					http.ServeFile(w, r, "web/html/502.html")
 				}
 				statsRW := &statsResponseWriter{ResponseWriter: w, statusCode: 200}
-				r.Body = &statsRequestBody{ReadCloser: r.Body}
+				r.Body = &statsRequestBody{ReadCloser: r.Body, srw: statsRW}
 				rp.ServeHTTP(statsRW, r)
 				return
 			}
@@ -3486,7 +3526,7 @@ func (wh *wafHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	proxyMutex.RUnlock()
 
-	r.Body = &statsRequestBody{ReadCloser: r.Body}
+	r.Body = &statsRequestBody{ReadCloser: r.Body, srw: statsRW}
 	wh.next.ServeHTTP(statsRW, r)
 }
 
@@ -7245,6 +7285,8 @@ func handleIPWhitelist(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			
+			go refreshIPCache()
+			
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": true,
 			})
@@ -7282,6 +7324,8 @@ func handleIPWhitelist(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			
+			go refreshIPCache()
+			
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": true,
 			})
@@ -7306,6 +7350,8 @@ func handleIPWhitelist(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		
+		go refreshIPCache()
 		
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
@@ -8415,6 +8461,8 @@ func handleIPBlacklist(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			
+			go refreshIPCache()
+			
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": true,
 			})
@@ -8452,6 +8500,8 @@ func handleIPBlacklist(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			
+			go refreshIPCache()
+			
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": true,
 			})
@@ -8476,6 +8526,8 @@ func handleIPBlacklist(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		
+		go refreshIPCache()
 		
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
@@ -8542,6 +8594,8 @@ func handleIPSettings(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		
+		go refreshIPCache()
 		
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
