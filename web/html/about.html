@@ -207,6 +207,26 @@
             background: #1d4ed8;
         }
 
+        .update-logs {
+            margin-top: 12px;
+            padding: 10px;
+            background: #f8fafc;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .update-logs ul {
+            margin: 5px 0 0 0;
+            padding-left: 20px;
+        }
+
+        .update-logs li {
+            margin-bottom: 3px;
+            word-break: break-all;
+        }
+
         @media (max-width: 640px) {
             .container {
                 padding: 28px 20px;
@@ -344,20 +364,29 @@
         })
         .then(function(response) { return response.json(); })
         .then(function(data) {
+            var logsHtml = '';
+            if (data.logs && data.logs.length > 0) {
+                logsHtml = '<div class="update-logs"><strong>更新日志：</strong><ul>';
+                data.logs.forEach(function(log) {
+                    logsHtml += '<li>' + escapeHtml(log) + '</li>';
+                });
+                logsHtml += '</ul></div>';
+            }
+            var statusEl = document.getElementById('updateStatus') || document.getElementById('autoUpdateStatus');
             if (data.success) {
                 if (statusEl) {
-                    statusEl.textContent = '✅ ' + data.message;
+                    statusEl.innerHTML = '✅ ' + data.message + logsHtml;
                     statusEl.style.color = '#059669';
                 }
-                alert('更新成功！请手动重启服务以使用新版本。');
             } else {
                 if (statusEl) {
-                    statusEl.textContent = '❌ ' + data.message;
+                    statusEl.innerHTML = '❌ ' + data.message + logsHtml;
                     statusEl.style.color = '#dc2626';
                 }
             }
         })
         .catch(function(err) {
+            var statusEl = document.getElementById('updateStatus') || document.getElementById('autoUpdateStatus');
             if (statusEl) {
                 statusEl.textContent = '❌ 更新失败: ' + err.message;
                 statusEl.style.color = '#dc2626';

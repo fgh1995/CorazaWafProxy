@@ -4241,63 +4241,33 @@ func handleAbout(w http.ResponseWriter, r *http.Request) {
 		Timeout: 30 * time.Second,
 	}
 
-	var remoteVersionInt int
-	var remoteVersionTxt string
 	var hasNewVersion bool
 	var downloadURL string
 	var downloadPlatform string
 	var releaseNotes string
+	var remoteVersionTxt string
 
-	versionResp, err := client.Get("https://raw.giteeusercontent.com/fangguihua1995/CorazaWafProxy/raw/main/main.go")
-	if err == nil {
-		defer versionResp.Body.Close()
-		versionContent, _ := io.ReadAll(versionResp.Body)
-		contentStr := string(versionContent)
-
-		intMatch := regexp.MustCompile(`localVersionInt\s*=\s*(\d+)`).FindStringSubmatch(contentStr)
-		if len(intMatch) == 2 {
-			fmt.Sscanf(intMatch[1], "%d", &remoteVersionInt)
-		}
-
-		txtMatch := regexp.MustCompile(`frontendVersion\s*=\s*"([^"]+)"`).FindStringSubmatch(contentStr)
-		if len(txtMatch) == 2 {
-			remoteVersionTxt = txtMatch[1]
-		}
-
-		if remoteVersionInt > localVersionInt {
-			hasNewVersion = true
-			downloadURL = getDownloadURL(remoteVersionTxt, "gitee")
-			downloadPlatform = "Gitee"
-		}
-	}
-
-	if !hasNewVersion {
-		githubResp, err := client.Get("https://raw.githubusercontent.com/fgh1995/CorazaWafProxy/main/main.go")
-		if err == nil {
-			defer githubResp.Body.Close()
-			versionContent, _ := io.ReadAll(githubResp.Body)
-			contentStr := string(versionContent)
-
-			intMatch := regexp.MustCompile(`localVersionInt\s*=\s*(\d+)`).FindStringSubmatch(contentStr)
-			if len(intMatch) == 2 {
-				fmt.Sscanf(intMatch[1], "%d", &remoteVersionInt)
-			}
-
-			txtMatch := regexp.MustCompile(`frontendVersion\s*=\s*"([^"]+)"`).FindStringSubmatch(contentStr)
-			if len(txtMatch) == 2 {
-				remoteVersionTxt = txtMatch[1]
-			}
+	apiURL := convertToMirrorURL("https://api.github.com/repos/fgh1995/CorazaWafProxy/releases/latest")
+	resp, err := client.Get(apiURL)
+	if err == nil && resp.StatusCode == 200 {
+		defer resp.Body.Close()
+		var release GithubRelease
+		if err := json.NewDecoder(resp.Body).Decode(&release); err == nil {
+			remoteVersionInt, _ := parseVersionFromTag(release.TagName)
+			remoteVersionTxt = release.TagName
+			releaseNotes = release.Body
+			downloadPlatform = "GitHub"
+			downloadURL = getDownloadURL(release.TagName)
 
 			if remoteVersionInt > localVersionInt {
 				hasNewVersion = true
-				downloadURL = getDownloadURL(remoteVersionTxt, "github")
-				downloadPlatform = "GitHub"
 			}
 		}
 	}
 
 	remoteContent := ""
-	resp, err := client.Get("https://raw.giteeusercontent.com/fangguihua1995/CorazaWafProxy/raw/main/about.html")
+	aboutURL := convertToMirrorURL("https://raw.githubusercontent.com/fgh1995/CorazaWafProxy/main/about.html")
+	resp, err = client.Get(aboutURL)
 	if err == nil {
 		defer resp.Body.Close()
 		content, err := io.ReadAll(resp.Body)
@@ -4345,7 +4315,7 @@ func convertToMirrorURL(url string) string {
 	return strings.Replace(url, "http://github.com/", mirror+"/", 1)
 }
 
-func getDownloadURL(version, platform string) string {
+func getDownloadURL(tagName string) string {
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
 
@@ -4369,19 +4339,37 @@ func getDownloadURL(version, platform string) string {
 		filename = fmt.Sprintf("CorazaWafProxy_windows_amd64.zip")
 	}
 
-	if platform == "gitee" {
-		return fmt.Sprintf("https://gitee.com/fangguihua1995/CorazaWafProxy/releases/download/%s/%s", version, filename)
-	}
-	return convertToMirrorURL(fmt.Sprintf("https://github.com/fgh1995/CorazaWafProxy/releases/download/%s/%s", version, filename))
+	return convertToMirrorURL(fmt.Sprintf("https://github.com/fgh1995/CorazaWafProxy/releases/download/%s/%s", tagName, filename))
 }
 
 type UpdateCheckResult struct {
 	HasNewVersion    bool   `json:"hasNewVersion"`
 	LocalVersion     string `json:"localVersion"`
 	RemoteVersion    string `json:"remoteVersion"`
+	RemoteVersionInt int    `json:"remoteVersionInt"`
 	DownloadURL      string `json:"downloadUrl"`
 	DownloadPlatform string `json:"downloadPlatform"`
 	ReleaseNotes     string `json:"releaseNotes"`
+}
+
+type GithubRelease struct {
+	TagName string `json:"tag_name"`
+	Body    string `json:"body"`
+}
+
+type GithubAsset struct {
+	Name                 string `json:"name"`
+	BrowserDownloadURL   string `json:"browser_download_url"`
+}
+
+func parseVersionFromTag(tag string) (versionInt int, versionTxt string) {
+	versionTxt = tag
+	re := regexp.MustCompile(`\((\d+)\)`)
+	matches := re.FindStringSubmatch(tag)
+	if len(matches) == 2 {
+		fmt.Sscanf(matches[1], "%d", &versionInt)
+	}
+	return
 }
 
 func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
@@ -4398,67 +4386,50 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 		LocalVersion: frontendVersion,
 	}
 
-	var remoteVersionInt int
-	var remoteVersionTxt string
+	apiURL := convertToMirrorURL("https://api.github.com/repos/fgh1995/CorazaWafProxy/releases/latest")
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		log.Printf("[版本检查] 获取GitHub releases失败: %v", err)
+		result.HasNewVersion = false
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(result)
+		return
+	}
+	defer resp.Body.Close()
 
-	versionResp, err := client.Get("https://raw.giteeusercontent.com/fangguihua1995/CorazaWafProxy/raw/main/main.go")
-	if err == nil {
-		defer versionResp.Body.Close()
-		versionContent, _ := io.ReadAll(versionResp.Body)
-		contentStr := string(versionContent)
-
-		intMatch := regexp.MustCompile(`localVersionInt\s*=\s*(\d+)`).FindStringSubmatch(contentStr)
-		if len(intMatch) == 2 {
-			fmt.Sscanf(intMatch[1], "%d", &remoteVersionInt)
-		}
-
-		txtMatch := regexp.MustCompile(`frontendVersion\s*=\s*"([^"]+)"`).FindStringSubmatch(contentStr)
-		if len(txtMatch) == 2 {
-			remoteVersionTxt = txtMatch[1]
-		}
-
-		if remoteVersionInt > localVersionInt {
-			result.HasNewVersion = true
-			result.RemoteVersion = remoteVersionTxt
-			result.DownloadURL = getDownloadURL(remoteVersionTxt, "gitee")
-			result.DownloadPlatform = "Gitee"
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(result)
-			return
-		}
+	if resp.StatusCode != 200 {
+		log.Printf("[版本检查] GitHub API返回状态码: %d", resp.StatusCode)
+		result.HasNewVersion = false
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(result)
+		return
 	}
 
-	githubResp, err := client.Get("https://raw.githubusercontent.com/fgh1995/CorazaWafProxy/main/main.go")
-	if err == nil {
-		defer githubResp.Body.Close()
-		versionContent, _ := io.ReadAll(githubResp.Body)
-		contentStr := string(versionContent)
-
-		intMatch := regexp.MustCompile(`localVersionInt\s*=\s*(\d+)`).FindStringSubmatch(contentStr)
-		if len(intMatch) == 2 {
-			fmt.Sscanf(intMatch[1], "%d", &remoteVersionInt)
-		}
-
-		txtMatch := regexp.MustCompile(`frontendVersion\s*=\s*"([^"]+)"`).FindStringSubmatch(contentStr)
-		if len(txtMatch) == 2 {
-			remoteVersionTxt = txtMatch[1]
-		}
-
-		if remoteVersionInt > localVersionInt {
-			result.HasNewVersion = true
-			result.RemoteVersion = remoteVersionTxt
-			result.DownloadURL = getDownloadURL(remoteVersionTxt, "github")
-			result.DownloadPlatform = "GitHub"
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(result)
-			return
-		}
+	var release GithubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		log.Printf("[版本检查] 解析release JSON失败: %v", err)
+		result.HasNewVersion = false
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(result)
+		return
 	}
 
-	result.HasNewVersion = false
+	remoteVersionInt, remoteVersionTxt := parseVersionFromTag(release.TagName)
 	result.RemoteVersion = remoteVersionTxt
+	result.RemoteVersionInt = remoteVersionInt
+	result.ReleaseNotes = release.Body
+	result.DownloadPlatform = "GitHub"
+	result.DownloadURL = getDownloadURL(release.TagName)
+
+	if remoteVersionInt > localVersionInt {
+		result.HasNewVersion = true
+	} else {
+		result.HasNewVersion = false
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(result)
@@ -4670,6 +4641,7 @@ func handleAutoUpdate(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(AutoUpdateResult{
 			Success: false,
 			Message: "无效的请求: " + err.Error(),
+			Logs:    []string{"[错误] 解析请求失败: " + err.Error()},
 		})
 		return
 	}
@@ -4683,94 +4655,125 @@ func handleAutoUpdate(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(AutoUpdateResult{
 			Success: false,
 			Message: "下载链接不能为空",
+			Logs:    []string{"[错误] 下载链接为空"},
 		})
 		return
 	}
 
-	log.Printf("[自动更新] 开始从 %s 下载更新包: %s", platform, downloadURL)
+	var logs []string
+	addLog := func(format string, args ...interface{}) {
+		msg := fmt.Sprintf(format, args...)
+		logs = append(logs, msg)
+		log.Println("[自动更新]", msg)
+	}
+
+	addLog("开始自动更新流程")
+	addLog("下载平台: %s", platform)
+	addLog("下载地址: %s", downloadURL)
 
 	client := &http.Client{
 		Timeout: 300 * time.Second,
 	}
 
+	addLog("正在下载更新包...")
 	resp, err := client.Get(downloadURL)
 	if err != nil {
+		addLog("下载失败: %v", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(AutoUpdateResult{
 			Success: false,
 			Message: "下载更新包失败: " + err.Error(),
+			Logs:    logs,
 		})
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		addLog("下载失败，HTTP状态码: %d", resp.StatusCode)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(AutoUpdateResult{
 			Success: false,
 			Message: fmt.Sprintf("下载失败，HTTP状态码: %d", resp.StatusCode),
+			Logs:    logs,
 		})
 		return
 	}
+	addLog("下载完成，状态码: %d", resp.StatusCode)
 
 	currentGOOS := runtime.GOOS
 	currentGOARCH := runtime.GOARCH
 	currentExec, err := os.Executable()
 	if err != nil {
+		addLog("无法获取当前程序路径: %v", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(AutoUpdateResult{
 			Success: false,
 			Message: "无法获取当前程序路径: " + err.Error(),
+			Logs:    logs,
 		})
 		return
 	}
+	addLog("当前程序路径: %s", currentExec)
+	addLog("目标平台: %s/%s", currentGOOS, currentGOARCH)
 
 	tmpDir, err := ioutil.TempDir("", "coraza-autoupdate-*")
 	if err != nil {
+		addLog("创建临时目录失败: %v", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(AutoUpdateResult{
 			Success: false,
 			Message: "创建临时目录失败: " + err.Error(),
+			Logs:    logs,
 		})
 		return
 	}
 	defer os.RemoveAll(tmpDir)
+	addLog("临时目录: %s", tmpDir)
 
 	tmpFile := filepath.Join(tmpDir, "update-package")
 	outFile, err := os.Create(tmpFile)
 	if err != nil {
+		addLog("创建临时文件失败: %v", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(AutoUpdateResult{
 			Success: false,
 			Message: "创建临时文件失败: " + err.Error(),
+			Logs:    logs,
 		})
 		return
 	}
 
+	addLog("正在保存更新包...")
 	_, err = io.Copy(outFile, resp.Body)
 	outFile.Close()
 	if err != nil {
+		addLog("保存更新包失败: %v", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(AutoUpdateResult{
 			Success: false,
 			Message: "保存更新包失败: " + err.Error(),
+			Logs:    logs,
 		})
 		return
 	}
+	addLog("更新包已保存")
 
 	updateFile, err := os.Open(tmpFile)
 	if err != nil {
+		addLog("打开更新包失败: %v", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(AutoUpdateResult{
 			Success: false,
 			Message: "打开更新包失败: " + err.Error(),
+			Logs:    logs,
 		})
 		return
 	}
@@ -4778,10 +4781,13 @@ func handleAutoUpdate(w http.ResponseWriter, r *http.Request) {
 
 	fileInfo, _ := updateFile.Stat()
 	fileSize := fileInfo.Size()
+	addLog("更新包大小: %d bytes", fileSize)
 
 	expectedExecName := getExpectedExecName(currentGOOS, currentGOARCH)
-	var extractedExecPath string
+	addLog("期望的可执行文件名: %s", expectedExecName)
 
+	var extractedExecPath string
+	addLog("正在解压更新包...")
 	if strings.HasSuffix(downloadURL, ".zip") {
 		extractedExecPath, err = extractZip(updateFile, fileSize, tmpDir, expectedExecName)
 	} else {
@@ -4789,46 +4795,58 @@ func handleAutoUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
+		addLog("解压失败: %v", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(AutoUpdateResult{
 			Success: false,
 			Message: "解压更新包失败: " + err.Error(),
+			Logs:    logs,
 		})
 		return
 	}
+	addLog("解压完成，程序路径: %s", extractedExecPath)
 
 	updatingExecPath := currentExec + ".updating"
-
+	addLog("正在备份当前程序...")
 	if err := os.Rename(currentExec, updatingExecPath); err != nil {
+		addLog("备份失败: %v", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(AutoUpdateResult{
 			Success: false,
 			Message: "准备更新文件失败: " + err.Error(),
+			Logs:    logs,
 		})
 		return
 	}
+	addLog("备份文件: %s", updatingExecPath)
 
+	addLog("正在替换程序...")
 	if err := atomicReplace(extractedExecPath, currentExec); err != nil {
 		os.Rename(updatingExecPath, currentExec)
+		addLog("替换失败，回滚中: %v", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(AutoUpdateResult{
 			Success: false,
 			Message: "替换程序失败: " + err.Error(),
+			Logs:    logs,
 		})
 		return
 	}
+	addLog("程序替换成功")
 
 	os.Chmod(currentExec, 0755)
 
+	addLog("更新流程完成，服务即将重启")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(AutoUpdateResult{
 		Success:      true,
 		Message:      "更新成功！服务正在重启...",
 		NeedsRestart: true,
+		Logs:         logs,
 	})
 
 	go func() {
@@ -4871,9 +4889,10 @@ rm -f "$0"
 }
 
 type AutoUpdateResult struct {
-	Success      bool   `json:"success"`
-	Message     string `json:"message"`
-	NeedsRestart bool   `json:"needsRestart"`
+	Success      bool     `json:"success"`
+	Message     string   `json:"message"`
+	NeedsRestart bool     `json:"needsRestart"`
+	Logs         []string `json:"logs"`
 }
 
 type UpdateDownloadRequest struct {
