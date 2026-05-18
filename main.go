@@ -55,7 +55,7 @@ import (
 )
 
 const frontendVersion = "v0.4.12"
-const localVersionInt = 40120 // 版本整数值，用于对比
+const localVersionInt = 40121 // 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
@@ -1405,14 +1405,19 @@ func upgradeTo15() error {
 	}
 
 	log.Println("升级到 1.5 完成")
+	return nil
+}
 
-	updateUpgradeProgress("migrating", 5, 5, "迁移到 1.6...")
-	_, err = db.Exec("INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('github_mirror', '', ?)", getUTCTimestamp())
+func upgradeTo16() error {
+	log.Println("升级到版本 1.6...")
+
+	updateUpgradeProgress("migrating", 1, 1, "添加 github_mirror 设置...")
+	_, err := db.Exec("INSERT OR IGNORE INTO system_settings (key, value, updated_at) VALUES ('github_mirror', '', ?)", getUTCTimestamp())
 	if err != nil {
 		log.Printf("添加 github_mirror 设置失败: %v", err)
 	}
 
-	updateUpgradeProgress("finalizing", 5, 5, "更新数据库版本...")
+	updateUpgradeProgress("finalizing", 1, 1, "更新数据库版本...")
 	err = setDBVersion("1.6")
 	if err != nil {
 		return fmt.Errorf("更新数据库版本失败: %w", err)
@@ -5258,7 +5263,7 @@ func handleDBUpgrade(w http.ResponseWriter, r *http.Request) {
 
 func getSequentialUpgradeSteps(currentVersion string) []string {
 	var steps []string
-	versions := []string{"1.0", "1.1", "1.2", "1.3", "1.4", "1.5"}
+	versions := []string{"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6"}
 	currentIdx := 0
 	
 	for i, v := range versions {
@@ -5297,6 +5302,8 @@ func performSequentialUpgrade(fromVersion string, steps []string) error {
 			err = upgradeTo14()
 		case "1.5":
 			err = upgradeTo15()
+		case "1.6":
+			err = upgradeTo16()
 		default:
 			err = fmt.Errorf("未知的升级目标版本: %s", targetVersion)
 		}

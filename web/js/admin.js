@@ -523,6 +523,13 @@ async function loadSystemSettings() {
             }
         }
 
+        if (result.success && result.githubMirror !== undefined) {
+            const mirrorElement = document.getElementById('settings-github-mirror');
+            if (mirrorElement) {
+                mirrorElement.value = result.githubMirror || '';
+            }
+        }
+
         await loadWebhookSettings();
     } catch (error) {
         console.error('加载系统设置失败:', error);
@@ -692,6 +699,33 @@ async function saveAdminPort() {
             showAlert('错误', '修改失败，请稍后重试');
         }
     });
+}
+
+async function saveGithubMirror() {
+    const mirror = document.getElementById('settings-github-mirror').value.trim();
+
+    try {
+        const response = await fetch('/api/system-settings', {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                githubMirror: mirror
+            })
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            showAlert('成功', 'GitHub 加速地址已保存');
+        } else {
+            showAlert('错误', result.error || '保存失败');
+        }
+    } catch (error) {
+        console.error('保存 GitHub 加速地址失败:', error);
+        showAlert('错误', '保存失败，请稍后重试');
+    }
 }
 
 async function saveSettings() {
