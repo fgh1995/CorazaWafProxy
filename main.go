@@ -4558,7 +4558,7 @@ func handleManualUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := os.Rename(newExecPath, currentExec); err != nil {
+	if err := atomicReplace(newExecPath, currentExec); err != nil {
 		os.Rename(updatingExecPath, currentExec)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -4767,7 +4767,7 @@ func handleAutoUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := os.Rename(extractedExecPath, currentExec); err != nil {
+	if err := atomicReplace(extractedExecPath, currentExec); err != nil {
 		os.Rename(updatingExecPath, currentExec)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -5022,6 +5022,39 @@ func extractTarGz(file multipart.File, destDir, expectedName string) (string, er
 	}
 
 	return extractedPath, nil
+}
+
+func copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return err
+	}
+
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+
+	return os.Chmod(dst, srcInfo.Mode())
+}
+
+func atomicReplace(src, dst string) error {
+	err := copyFile(src, dst)
+	if err != nil {
+		return err
+	}
+	return os.Remove(src)
 }
 
 type SystemInfo struct {
