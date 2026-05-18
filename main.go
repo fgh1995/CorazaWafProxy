@@ -55,7 +55,7 @@ import (
 )
 
 const frontendVersion = "v0.4.16"
-const localVersionInt = 40161 // 版本整数值，用于对比
+const localVersionInt = 40162 // 版本整数值，用于对比
 const ReleaseNotes = "" // 更新日志
 
 var db *sql.DB
@@ -4294,10 +4294,6 @@ func handleAbout(w http.ResponseWriter, r *http.Request) {
 }
 
 func convertToMirrorURL(url string) string {
-	if !strings.HasPrefix(url, "https://github.com/") && !strings.HasPrefix(url, "http://github.com/") {
-		return url
-	}
-
 	var mirror string
 	err := db.QueryRow("SELECT value FROM system_settings WHERE key = 'github_mirror'").Scan(&mirror)
 	if err != nil || mirror == "" {
@@ -4305,10 +4301,16 @@ func convertToMirrorURL(url string) string {
 	}
 
 	mirror = strings.TrimSuffix(mirror, "/")
-	if strings.HasPrefix(url, "https://github.com/") {
-		return strings.Replace(url, "https://github.com/", mirror+"/", 1)
+
+	if strings.HasPrefix(url, "https://github.com/") || strings.HasPrefix(url, "http://github.com/") {
+		return mirror + "/" + url
 	}
-	return strings.Replace(url, "http://github.com/", mirror+"/", 1)
+
+	if strings.HasPrefix(url, "https://raw.githubusercontent.com/") || strings.HasPrefix(url, "http://raw.githubusercontent.com/") {
+		return mirror + "/" + url
+	}
+
+	return url
 }
 
 func getDownloadURL(tagName string) string {
@@ -4858,41 +4860,8 @@ func handleAutoUpdate(w http.ResponseWriter, r *http.Request) {
 	})
 
 	go func() {
-		time.Sleep(500 * time.Millisecond)
-		execDir := filepath.Dir(currentExec)
-		if currentGOOS == "windows" {
-			scriptContent := fmt.Sprintf(`@echo off
-:wait
-ping -n 2 127.0.0.1 >nul
-if exist "%s" goto wait
-del "%s" 2>nul
-start "" "%s"
-del "%%~f0" 2>nul
-`, updatingExecPath, updatingExecPath, currentExec)
-			restartScriptPath := filepath.Join(execDir, "update-restart.bat")
-			ioutil.WriteFile(restartScriptPath, []byte(scriptContent), 0755)
-			goexec := os.Getenv("COMSPEC")
-			if goexec == "" {
-				goexec = "cmd.exe"
-			}
-			exec.Command(goexec, "/C", "start", "", restartScriptPath).Start()
-		} else {
-			scriptContent := fmt.Sprintf(`#!/bin/bash
-while [ -f "%s" ]; do
-    sleep 0.5
-done
-rm -f "%s"
-"%s" &
-rm -f "$0"
-`, updatingExecPath, updatingExecPath, currentExec)
-			restartScriptPath := filepath.Join(execDir, "update-restart.sh")
-			ioutil.WriteFile(restartScriptPath, []byte(scriptContent), 0755)
-			os.Chmod(restartScriptPath, 0755)
-			exec.Command("/bin/bash", restartScriptPath).Start()
-		}
-		log.Println("[自动更新] 服务即将重启...")
 		time.Sleep(1 * time.Second)
-		os.Exit(0)
+		restartProgram()
 	}()
 }
 
