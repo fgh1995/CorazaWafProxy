@@ -4515,23 +4515,14 @@ func handleManualUpdate(w http.ResponseWriter, r *http.Request) {
 
 	file.Seek(0, 0)
 
-	tmpDir, err := ioutil.TempDir("", "coraza-update-*")
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(ManualUpdateResult{
-			Success:  false,
-			Message:  "创建临时目录失败: " + err.Error(),
-		})
-		return
-	}
-	defer os.RemoveAll(tmpDir)
+	extractDir := filepath.Dir(currentExec)
+	log.Printf("[手动更新] 提取更新文件到: %s", extractDir)
 
-	var extractedPath string
+	var extractedExecPath string
 	if isZip {
-		extractedPath, err = extractZip(file, header.Size, tmpDir, expectedExecName)
+		extractedExecPath, err = extractZip(file, header.Size, extractDir, expectedExecName)
 	} else {
-		extractedPath, err = extractTarGz(file, tmpDir, expectedExecName)
+		extractedExecPath, err = extractTarGz(file, extractDir, expectedExecName)
 	}
 
 	if err != nil {
@@ -4544,44 +4535,14 @@ func handleManualUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	backupPath := currentExec + ".bak"
-	if _, err := os.Stat(backupPath); err == nil {
-		os.Remove(backupPath)
-	}
-
-	if err := os.Rename(currentExec, backupPath); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(ManualUpdateResult{
-			Success:  false,
-			Message:  "备份当前程序失败: " + err.Error(),
-		})
-		return
-	}
-
-	if err := os.Rename(extractedPath, currentExec); err != nil {
-		os.Rename(backupPath, currentExec)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(ManualUpdateResult{
-			Success:     false,
-			Message:     "替换程序失败，已恢复原程序: " + err.Error(),
-			NeedsRestart: false,
-		})
-		return
-	}
-
-	os.Chmod(currentExec, 0755)
-
-	log.Printf("[手动更新] 程序已更新，旧程序备份为: %s", backupPath)
+	log.Printf("[手动更新] 程序已更新: %s -> %s", extractedExecPath, currentExec)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(ManualUpdateResult{
 		Success:      true,
-		Message:      fmt.Sprintf("更新成功！程序已替换为新版本 (原程序已备份为 %s)", backupPath),
+		Message:      "更新成功！程序及资源文件已更新（data目录已保留）",
 		NeedsRestart: true,
-		BackupPath:   backupPath,
 	})
 }
 
@@ -4664,18 +4625,48 @@ func extractZip(file multipart.File, size int64, destDir, expectedName string) (
 
 	var extractedPath string
 	for _, f := range zipr.File {
-		name := filepath.Base(f.Name)
-		if name != expectedName && name != expectedName+".exe" {
+		name := f.Name
+
+		if strings.HasPrefix(name, "data/") || strings.HasPrefix(name, "data\\") {
 			continue
 		}
 
+		if filepath.Base(name) == expectedName || filepath.Base(name) == expectedName+".exe" {
+			extractedPath = filepath.Join(destDir, filepath.Base(name))
+			rc, err := f.Open()
+			if err != nil {
+				return "", err
+			}
+
+			outFile, err := os.OpenFile(extractedPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
+			if err != nil {
+				rc.Close()
+				return "", err
+			}
+
+			if _, err := io.Copy(outFile, rc); err != nil {
+				rc.Close()
+				outFile.Close()
+				return "", err
+			}
+			rc.Close()
+			outFile.Close()
+			continue
+		}
+
+		headerPath := filepath.Join(destDir, name)
+		if strings.HasSuffix(name, "/") {
+			os.MkdirAll(headerPath, 0755)
+			continue
+		}
+
+		os.MkdirAll(filepath.Dir(headerPath), 0755)
 		rc, err := f.Open()
 		if err != nil {
 			return "", err
 		}
 
-		extractedPath = filepath.Join(destDir, name)
-		outFile, err := os.OpenFile(extractedPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
+		outFile, err := os.OpenFile(headerPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 		if err != nil {
 			rc.Close()
 			return "", err
@@ -4688,7 +4679,6 @@ func extractZip(file multipart.File, size int64, destDir, expectedName string) (
 		}
 		rc.Close()
 		outFile.Close()
-		break
 	}
 
 	if extractedPath == "" {
@@ -4717,17 +4707,25 @@ func extractTarGz(file multipart.File, destDir, expectedName string) (string, er
 			continue
 		}
 
-		name := filepath.Base(hdr.Name)
-		if name != expectedName && name != expectedName+".exe" {
+		name := hdr.Name
+
+		if strings.HasPrefix(name, "data/") {
 			continue
 		}
+
+		headerPath := filepath.Join(destDir, name)
 
 		if hdr.FileInfo().Mode().IsDir() {
+			os.MkdirAll(headerPath, 0755)
 			continue
 		}
 
-		extractedPath = filepath.Join(destDir, name)
-		outFile, err := os.OpenFile(extractedPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
+		if filepath.Base(name) == expectedName || filepath.Base(name) == expectedName+".exe" {
+			extractedPath = headerPath
+		}
+
+		os.MkdirAll(filepath.Dir(headerPath), 0755)
+		outFile, err := os.OpenFile(headerPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
 		if err != nil {
 			return "", err
 		}
@@ -4737,7 +4735,6 @@ func extractTarGz(file multipart.File, destDir, expectedName string) (string, er
 			return "", err
 		}
 		outFile.Close()
-		break
 	}
 
 	if extractedPath == "" {

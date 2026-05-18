@@ -38,45 +38,48 @@ jobs:
           GOOS: windows
           GOARCH: amd64
         run: |
-          mkdir -p release
-          go build -ldflags "-s -w" -o release/CorazaWafProxy.exe .
-          cd release && zip -r CorazaWafProxy_windows_amd64.zip CorazaWafProxy.exe config/ coreruleset/ static/ web/
+          go build -ldflags "-s -w" -o CorazaWafProxy.exe .
+          zip -r release/CorazaWafProxy_windows_amd64.zip CorazaWafProxy.exe config/ coreruleset/ static/ web/
 
       - name: Build Linux amd64
         env:
           GOOS: linux
           GOARCH: amd64
         run: |
-          mkdir -p release
-          go build -ldflags "-s -w" -o release/CorazaWafProxy .
-          cd release && tar -czf CorazaWafProxy_linux_amd64.tar.gz CorazaWafProxy config/ coreruleset/ static/ web/
+          go build -ldflags "-s -w" -o CorazaWafProxy .
+          tar -czf release/CorazaWafProxy_linux_amd64.tar.gz CorazaWafProxy config/ coreruleset/ static/ web/
 
       - name: Build Linux arm64
         env:
           GOOS: linux
           GOARCH: arm64
         run: |
-          mkdir -p release
-          go build -ldflags "-s -w" -o release/CorazaWafProxy .
-          cd release && tar -czf CorazaWafProxy_linux_arm64.tar.gz CorazaWafProxy config/ coreruleset/ static/ web/
+          go build -ldflags "-s -w" -o CorazaWafProxy .
+          tar -czf release/CorazaWafProxy_linux_arm64.tar.gz CorazaWafProxy config/ coreruleset/ static/ web/
 
       - name: Build macOS amd64
         env:
           GOOS: darwin
           GOARCH: amd64
         run: |
-          mkdir -p release
-          go build -ldflags "-s -w" -o release/CorazaWafProxy .
-          cd release && tar -czf CorazaWafProxy_darwin_amd64.tar.gz CorazaWafProxy config/ coreruleset/ static/ web/
+          go build -ldflags "-s -w" -o CorazaWafProxy .
+          tar -czf release/CorazaWafProxy_darwin_amd64.tar.gz CorazaWafProxy config/ coreruleset/ static/ web/
 
       - name: Build macOS arm64 (Apple Silicon)
         env:
           GOOS: darwin
           GOARCH: arm64
         run: |
-          mkdir -p release
-          go build -ldflags "-s -w" -o release/CorazaWafProxy .
-          cd release && tar -czf CorazaWafProxy_darwin_arm64.tar.gz CorazaWafProxy config/ coreruleset/ static/ web/
+          go build -ldflags "-s -w" -o CorazaWafProxy .
+          tar -czf release/CorazaWafProxy_darwin_arm64.tar.gz CorazaWafProxy config/ coreruleset/ static/ web/
+
+      - name: Create release directory
+        run: mkdir -p release
+
+      - name: Move artifacts
+        run: |
+          mv CorazaWafProxy_windows_amd64.zip release/ 2>/dev/null || true
+          mv *.tar.gz release/ 2>/dev/null || true
 
       - name: Create SHA256 checksums
         run: |
