@@ -23,6 +23,9 @@ jobs:
         with:
           go-version: '1.21'
 
+      - name: Install zip
+        run: sudo apt-get update && sudo apt-get install -y zip
+
       - name: Get version from tag
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
@@ -34,7 +37,7 @@ jobs:
         run: |
           mkdir -p release
           go build -ldflags "-s -w" -o release/CorazaWafProxy_windows_amd64.exe .
-          cd release && powershell -Command "Compress-Archive -Force CorazaWafProxy_windows_amd64.exe CorazaWafProxy_windows_amd64.zip"
+          cd release && zip -j CorazaWafProxy_windows_amd64.zip CorazaWafProxy_windows_amd64.exe
 
       - name: Build Linux amd64
         env:
