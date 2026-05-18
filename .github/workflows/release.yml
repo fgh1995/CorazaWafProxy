@@ -33,6 +33,9 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
+      - name: Create release directory
+        run: mkdir -p release
+
       - name: Build Windows amd64
         env:
           GOOS: windows
@@ -72,14 +75,6 @@ jobs:
         run: |
           go build -ldflags "-s -w" -o CorazaWafProxy .
           tar -czf release/CorazaWafProxy_darwin_arm64.tar.gz CorazaWafProxy config/ coreruleset/ static/ web/
-
-      - name: Create release directory
-        run: mkdir -p release
-
-      - name: Move artifacts
-        run: |
-          mv CorazaWafProxy_windows_amd64.zip release/ 2>/dev/null || true
-          mv *.tar.gz release/ 2>/dev/null || true
 
       - name: Create SHA256 checksums
         run: |
