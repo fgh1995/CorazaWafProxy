@@ -54,8 +54,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const frontendVersion = "v0.4.12"
-const localVersionInt = 40121 // 版本整数值，用于对比
+const frontendVersion = "v0.4.13"
+const localVersionInt = 40131 // 版本整数值，用于对比
 
 var db *sql.DB
 var wafInstances = make(map[string]*WAFInstance)
